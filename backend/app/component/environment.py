@@ -1,31 +1,124 @@
-import logging
-import importlib.util
-import os
-from pathlib import Path
-from fastapi import APIRouter, FastAPI
-from dotenv import load_dotenv
+# ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
+
 import importlib
-from typing import Any, overload
+import importlib.util
+import logging
+import os
 import threading
+from collections.abc import Iterable
+from pathlib import Path
+from typing import Any, overload
+
+from dotenv import dotenv_values, load_dotenv
+from fastapi import APIRouter, FastAPI
 
 logger = logging.getLogger("env")
 
 # Thread-local storage for user-specific environment
 _thread_local = threading.local()
 
-# Default global environment path
-default_env_path = os.path.join(os.path.expanduser("~"), ".eigent", ".env")
-load_dotenv(dotenv_path=default_env_path)
+# Keys present before dotenv files are loaded remain authoritative. Values
+# loaded from dotenv files can be refreshed from disk by env().
+_process_env_keys = set(os.environ.keys())
 
 # Safe base directory for user environment files
 env_base_dir = os.path.join(os.path.expanduser("~"), ".eigent")
+
+# Default global environment path
+default_env_path = os.path.join(env_base_dir, ".env")
+
+
+def _resolve_initial_env_paths() -> tuple[Path, ...]:
+    backend_dir = Path(__file__).resolve().parents[2]
+    repo_root = backend_dir.parent
+    return (
+        Path(default_env_path),
+        backend_dir / ".env",
+        backend_dir / ".env.development",
+        repo_root / ".env",
+        repo_root / ".env.development",
+    )
+
+
+def _load_initial_env_files(paths: Iterable[Path]) -> list[Path]:
+    """
+    Load backend env files for both Electron and standalone web development.
+
+    Precedence is:
+    1. Real process environment, always highest.
+    2. Later files in `paths`.
+    3. Earlier files in `paths`.
+    """
+    original_env = dict(os.environ)
+    global _process_env_keys
+    _process_env_keys = set(original_env.keys())
+    loaded_paths: list[Path] = []
+    seen: set[str] = set()
+
+    for path in paths:
+        resolved = path.expanduser().resolve()
+        resolved_key = str(resolved)
+        if resolved_key in seen:
+            continue
+        seen.add(resolved_key)
+        if not resolved.exists():
+            continue
+        load_dotenv(dotenv_path=resolved, override=True)
+        loaded_paths.append(resolved)
+
+    # Keep shell / service-manager env vars authoritative over dotenv files.
+    for key, value in original_env.items():
+        os.environ[key] = value
+
+    if loaded_paths:
+        logger.info(
+            "Loaded backend env files: %s",
+            ", ".join(str(path) for path in loaded_paths),
+        )
+    return loaded_paths
+
+
+def _load_live_env_values(paths: Iterable[Path]) -> dict[str, str]:
+    values: dict[str, str] = {}
+    seen: set[str] = set()
+
+    for path in paths:
+        resolved = path.expanduser().resolve()
+        resolved_key = str(resolved)
+        if resolved_key in seen:
+            continue
+        seen.add(resolved_key)
+        if not resolved.exists():
+            continue
+
+        for key, value in dotenv_values(resolved).items():
+            if value is not None:
+                values[key] = value
+
+    return values
+
+
+_load_initial_env_files(_resolve_initial_env_paths())
 
 
 def sanitize_env_path(env_path: str | None) -> str | None:
     """
     Validate and sanitize user-provided environment file path.
 
-    Security: Ensures the path stays within ~/.eigent directory and ends with .env
+    Security: Ensures the path stays within ~/.eigent directory
+    and ends with .env
     to prevent path traversal attacks and unauthorized file access.
 
     Args:
@@ -61,11 +154,11 @@ def sanitize_env_path(env_path: str | None) -> str | None:
             )
             return None
 
-        # Enforce .env file extension
-        if not resolved_path.name.endswith('.env'):
+        name = resolved_path.name
+        if not (name.endswith(".env") or name.startswith(".env.")):
             logger.warning(
                 f"Security: Rejected env_path with invalid extension. "
-                f"Path: {env_path}, must end with .env"
+                f"Path: {env_path}, must be .env or .env.*"
             )
             return None
 
@@ -90,10 +183,10 @@ def set_user_env_path(env_path: str | None = None):
     # Sanitize the path before any filesystem operations
     safe_env_path = sanitize_env_path(env_path)
 
+    exists_value = os.path.exists(safe_env_path) if safe_env_path else None
     logger.info(
         f"Setting user environment path: original={env_path}, "
-        f"sanitized={safe_env_path}, "
-        f"exists={safe_env_path and os.path.exists(safe_env_path) if safe_env_path else None}"
+        f"sanitized={safe_env_path}, exists={exists_value}"
     )
 
     if safe_env_path and os.path.exists(safe_env_path):
@@ -103,21 +196,27 @@ def set_user_env_path(env_path: str | None = None):
         logger.info(f"User-specific environment loaded: {safe_env_path}")
     else:
         # Clear thread-local env_path to fall back to global
-        if hasattr(_thread_local, 'env_path'):
-            delattr(_thread_local, 'env_path')
+        if hasattr(_thread_local, "env_path"):
+            delattr(_thread_local, "env_path")
         logger.info("Reset to default global environment")
 
         if env_path and not safe_env_path:
-            logger.warning(f"User environment path rejected by security validation: {env_path}")
+            logger.warning(
+                f"User environment path rejected by security "
+                f"validation: {env_path}"
+            )
         elif safe_env_path and not os.path.exists(safe_env_path):
-            logger.warning(f"User environment path does not exist, falling back to global: {safe_env_path}")
+            logger.warning(
+                f"User environment path does not exist, "
+                f"falling back to global: {safe_env_path}"
+            )
 
 
 def get_current_env_path() -> str:
     """
     Get current environment path (either user-specific or default).
     """
-    return getattr(_thread_local, 'env_path', default_env_path)
+    return getattr(_thread_local, "env_path", default_env_path)
 
 
 @overload
@@ -138,37 +237,97 @@ def env(key: str, default=None):
     First checks thread-local user-specific environment,
     then falls back to global environment.
 
-    Security: Uses sanitized path stored in _thread_local.env_path
-    which has already been validated by set_user_env_path.
+    Security: Re-validates path at point of use to ensure integrity.
     """
-    # If we have a user-specific environment path, try to reload it to get latest values
-    # Note: _thread_local.env_path is already sanitized by set_user_env_path
-    if hasattr(_thread_local, 'env_path') and os.path.exists(_thread_local.env_path):
-        # Temporarily load user-specific env to get the latest value
-        from dotenv import dotenv_values
-        user_env_values = dotenv_values(_thread_local.env_path)
-        if key in user_env_values:
-            value = user_env_values[key] or default
-            logger.debug(f"Environment variable retrieved from user-specific config: key={key}, env_path={_thread_local.env_path}, has_value={value is not None}")
-            return value
+    # Run-scoped values are the first source of truth for mutable runtime
+    # settings. This keeps legacy `env("file_save_path")` call sites working
+    # without relying on process-global os.environ during concurrent runs.
+    try:
+        # Inline import avoids a startup cycle: run_context imports no env
+        # helpers, but many early modules import env before the runtime package.
+        from app.run_context import get_run_env_override
 
-    # Fall back to global environment
-    value = os.getenv(key, default)
-    logger.debug(f"Environment variable retrieved from global config: key={key}, has_value={value is not None}, using_default={value == default}")
+        run_value = get_run_env_override(key)
+        if run_value is not None:
+            logger.debug(
+                f"Environment variable retrieved from RunContext: key={key}"
+            )
+            return run_value
+    except ImportError:
+        pass
+
+    # If we have a user-specific environment path, try to reload it
+    # to get latest values.
+    if hasattr(_thread_local, "env_path"):
+        # Re-validate path at point of use for security
+        stored_path = _thread_local.env_path
+        validated_path = sanitize_env_path(stored_path)
+
+        if validated_path and os.path.exists(validated_path):
+            # Temporarily load user-specific env to get the latest value
+            from dotenv import dotenv_values
+
+            user_env_values = dotenv_values(validated_path)
+            if key in user_env_values:
+                value = user_env_values[key] or default
+                logger.debug(
+                    f"Environment variable retrieved from user-specific "
+                    f"config: key={key}, env_path={validated_path}, "
+                    f"has_value={value is not None}"
+                )
+                return value
+        elif stored_path and not validated_path:
+            # Path failed validation - clear it and log warning
+            logger.warning(
+                f"Security: Thread-local env_path failed re-validation, "
+                f"clearing: {stored_path}"
+            )
+            delattr(_thread_local, "env_path")
+
+    # Keep real process / service-manager env vars authoritative, but allow
+    # dotenv-backed values to be refreshed after Electron writes them.
+    if key in _process_env_keys and key in os.environ:
+        value = os.environ[key]
+        logger.debug(
+            f"Environment variable retrieved from process env: key={key}, "
+            f"has_value={value is not None}"
+        )
+        return value
+
+    live_env_values = _load_live_env_values(_resolve_initial_env_paths())
+    if key in live_env_values:
+        value = live_env_values[key]
+        logger.debug(
+            f"Environment variable retrieved from live dotenv config: "
+            f"key={key}, has_value={value is not None}"
+        )
+        return value
+
+    # Fall back to any value set programmatically after startup.
+    value = os.environ.get(key, default)
+    logger.debug(
+        f"Environment variable retrieved from global config: key={key}, "
+        f"has_value={value is not None}, using_default={value == default}"
+    )
     return value
 
 
 def env_or_fail(key: str):
     value = env(key)
     if value is None:
-        logger.warning(f"[ENVIRONMENT] can't get env config value for key: {key}")
+        logger.warning(
+            f"[ENVIRONMENT] can't get env config value for key: {key}"
+        )
         raise Exception(f"can't get env config value for key: {key}")
     return value
+
 
 def env_not_empty(key: str):
     value = env(key)
     if not value:
-        logger.warning(f"[ENVIRONMENT] env config value can't be empty for key: {key}")
+        logger.warning(
+            f"[ENVIRONMENT] env config value can't be empty for key: {key}"
+        )
         raise Exception(f"env config value can't be empty for key: {key}")
     return value
 
@@ -192,7 +351,8 @@ def auto_import(package: str):
     # Import all .py files in the folder
     for file in files:
         if file.endswith(".py") and not file.startswith("__"):
-            module_name = file[:-3]  # Remove the .py extension from filename
+            # Remove the .py extension from filename
+            module_name = file[:-3]
             importlib.import_module(package + "." + module_name)
 
 
@@ -210,7 +370,9 @@ def auto_include_routers(api: FastAPI, prefix: str, directory: str):
     # Traverse all .py files in the directory
     for root, _, files in os.walk(dir_path):
         for file_name in files:
-            if file_name.endswith("_controller.py") and not file_name.startswith("__"):
+            if file_name.endswith(
+                "_controller.py"
+            ) and not file_name.startswith("__"):
                 # Construct complete file path
                 file_path = Path(root) / file_name
 
@@ -218,13 +380,16 @@ def auto_include_routers(api: FastAPI, prefix: str, directory: str):
                 module_name = file_path.stem
 
                 # Load module using importlib
-                spec = importlib.util.spec_from_file_location(module_name, file_path)
+                spec = importlib.util.spec_from_file_location(
+                    module_name, file_path
+                )
                 if spec is None or spec.loader is None:
                     continue
                 module = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(module)
 
-                # Check if router attribute exists in module and is an APIRouter instance
+                # Check if router attribute exists in module
+                # and is an APIRouter instance
                 router = getattr(module, "router", None)
                 if isinstance(router, APIRouter):
                     api.include_router(router, prefix=prefix)

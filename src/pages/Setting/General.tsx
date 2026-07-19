@@ -12,238 +12,312 @@
 // limitations under the License.
 // ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { LogOut, Settings, Check } from "lucide-react";
-import light from "@/assets/light.png";
-import dark from "@/assets/dark.png";
-import transparent from "@/assets/transparent.png";
-import { useAuthStore } from "@/store/authStore";
-import { useInstallationStore } from "@/store/installationStore";
-import { useNavigate } from "react-router-dom";
-import { proxyFetchPut, proxyFetchGet } from "@/api/http";
-import { createRef, RefObject } from "react";
-import { useEffect, useState } from "react";
-import { useChatStore } from "@/store/chatStore";
-import { LocaleEnum, switchLanguage } from "@/i18n";
-import { useTranslation } from "react-i18next";
-import { toast } from "sonner";
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { LocaleEnum, switchLanguage } from '@/i18n';
+import { SITE_URL } from '@/lib';
+import { useAuthStore } from '@/store/authStore';
+import { useInstallationStore } from '@/store/installationStore';
+import { LogOut, Settings } from 'lucide-react';
+import { createRef, RefObject, useEffect, useState } from 'react';
+import { Trans, useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
+import { toast } from 'sonner';
 
 import {
-	Select,
-	SelectContent,
-	SelectGroup,
-	SelectItem,
-	SelectLabel,
-	SelectTrigger,
-	SelectValue,
-} from "@/components/ui/select";
-import useChatStoreAdapter from "@/hooks/useChatStoreAdapter";
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import useChatStoreAdapter from '@/hooks/useChatStoreAdapter';
+import { useHost } from '@/host';
 
 export default function SettingGeneral() {
-	const { t } = useTranslation();
-	const authStore = useAuthStore();
+  const { t } = useTranslation();
+  const host = useHost();
+  const authStore = useAuthStore();
 
-	const resetInstallation = useInstallationStore(state => state.reset);
-	const setNeedsBackendRestart = useInstallationStore(state => state.setNeedsBackendRestart);
+  const resetInstallation = useInstallationStore((state) => state.reset);
+  const setNeedsBackendRestart = useInstallationStore(
+    (state) => state.setNeedsBackendRestart
+  );
 
-	const navigate = useNavigate();
-	const [isLoading, setIsLoading] = useState(false);
-	const setAppearance = authStore.setAppearance;
-	const language = authStore.language;
-	const setLanguage = authStore.setLanguage;
-	const appearance = authStore.appearance;
-	const fullNameRef: RefObject<HTMLInputElement> = createRef();
-	const nickNameRef: RefObject<HTMLInputElement> = createRef();
-	const workDescRef: RefObject<HTMLInputElement> = createRef();
-	//Get Chatstore for the active project's task
-	const { chatStore } = useChatStoreAdapter();
-	if (!chatStore) {
-		return <div>Loading...</div>;
-	}
-	
+  const navigate = useNavigate();
+  const [_isLoading, _setIsLoading] = useState(false);
+  const language = authStore.language;
+  const _setLanguage = authStore.setLanguage;
+  const _fullNameRef: RefObject<HTMLInputElement> = createRef();
+  const _nickNameRef: RefObject<HTMLInputElement> = createRef();
+  const _workDescRef: RefObject<HTMLInputElement> = createRef();
+  //Get Chatstore for the active project's task
+  const { chatStore } = useChatStoreAdapter();
 
-	const [themeList, setThemeList] = useState<any>([
-		{
-			img: light,
-			label: "setting.light",
-			value: "light",
-		},
-		{
-			img: transparent,
-			label: "setting.transparent",
-			value: "transparent",
-		},
-	]);
+  // Proxy configuration state
+  const [proxyUrl, setProxyUrl] = useState('');
+  const [isProxySaving, setIsProxySaving] = useState(false);
+  const [proxyNeedsRestart, setProxyNeedsRestart] = useState(false);
 
-	const languageList = [
-		{
-			key: LocaleEnum.English,
-			label: "English",
-		},
-		{
-			key: LocaleEnum.SimplifiedChinese,
-			label: "简体中文",
-		},
-		{
-			key: LocaleEnum.TraditionalChinese,
-			label: "繁體中文",
-		},
-		{
-			key: LocaleEnum.Japanese,
-			label: "日本語",
-		},
-		{
-			key: LocaleEnum.Arabic,
-			label: "العربية",
-		},
-		{
-			key: LocaleEnum.French,
-			label: "Français",
-		},
-		{
-			key: LocaleEnum.German,
-			label: "Deutsch",
-		},
-		{
-			key: LocaleEnum.Russian,
-			label: "Русский",
-		},
-		{
-			key: LocaleEnum.Spanish,
-			label: "Español",
-		},
-		{
-			key: LocaleEnum.Korean,
-			label: "한국어",
-		},
-		{
-			key: LocaleEnum.Italian,
-			label: "Italiano",
-		},
-	];
+  const languageList = [
+    {
+      key: LocaleEnum.English,
+      label: 'English',
+    },
+    {
+      key: LocaleEnum.SimplifiedChinese,
+      label: '简体中文',
+    },
+    {
+      key: LocaleEnum.TraditionalChinese,
+      label: '繁體中文',
+    },
+    {
+      key: LocaleEnum.Japanese,
+      label: '日本語',
+    },
+    {
+      key: LocaleEnum.Arabic,
+      label: 'العربية',
+    },
+    {
+      key: LocaleEnum.French,
+      label: 'Français',
+    },
+    {
+      key: LocaleEnum.German,
+      label: 'Deutsch',
+    },
+    {
+      key: LocaleEnum.Russian,
+      label: 'Русский',
+    },
+    {
+      key: LocaleEnum.Spanish,
+      label: 'Español',
+    },
+    {
+      key: LocaleEnum.Korean,
+      label: '한국어',
+    },
+    {
+      key: LocaleEnum.Italian,
+      label: 'Italiano',
+    },
+  ];
 
-	useEffect(() => {
-		const platform = window.electronAPI.getPlatform();
-		console.log(platform);
-		if (platform === "darwin") {
-			setThemeList([
-				{
-					img: light,
-					label: "setting.light",
-					value: "light",
-				},
-				{
-					img: transparent,
-					label: "setting.transparent",
-					value: "transparent",
-				},
-			]);
-		} else {
-			setThemeList([
-				{
-					img: light,
-					label: "setting.light",
-					value: "light",
-				},
-			]);
-		}
-	}, []);
+  useEffect(() => {
+    // Load proxy configuration from global env
+    const loadProxyConfig = async () => {
+      if (host?.electronAPI?.readGlobalEnv) {
+        try {
+          const result = await host.electronAPI.readGlobalEnv('HTTP_PROXY');
+          if (result?.value) {
+            setProxyUrl(result.value);
+          }
+        } catch (_error) {
+          console.log('No proxy configured');
+        }
+      }
+    };
+    loadProxyConfig();
+  }, [host]);
 
-	return (
-		<div className="space-y-8">
-			<div className="px-6 py-4 bg-surface-secondary rounded-2xl">
-				<div className="text-base font-bold leading-12 text-text-body">
-					{t("setting.account")}
-				</div>
-				<div className="text-sm leading-13 mb-4">
-					{t("setting.you-are-currently-signed-in-with", {
-						email: authStore.email,
-					})}
-				</div>
-				<div className="flex items-center gap-sm">
-					<Button
-						onClick={() => {
-							window.location.href = `https://www.eigent.ai/dashboard?email=${authStore.email}`;
-						}}
-						variant="primary"
-						size="xs"
-					>
-						<Settings className="w-4 h-4 text-button-primary-icon-default" />
-						{t("setting.manage")}
-					</Button>
-					<Button
-						variant="outline"
-						size="xs"
-						onClick={() => {
-							chatStore.clearTasks();
+  // Save proxy configuration
+  const handleSaveProxy = async () => {
+    if (!authStore.email) {
+      toast.error(t('setting.proxy-save-failed'));
+      return;
+    }
 
-							resetInstallation(); // Reset installation state for new account
-							setNeedsBackendRestart(true); // Mark that backend is restarting
+    const trimmed = proxyUrl.trim();
 
-							authStore.logout();
-							navigate("/login");
-						}}
-					>
-						<LogOut className="w-4 h-4 text-button-tertiery-text-default" />
-						{t("setting.log-out")}
-					</Button>
-				</div>
-			</div>
-			<div className="px-6 py-4 bg-surface-secondary rounded-2xl">
-				<div className="text-base font-bold leading-12 text-text-primary">
-					{t("setting.language")}
-				</div>
-				<div className="mt-md">
-					<Select value={language} onValueChange={switchLanguage}>
-						<SelectTrigger>
-							<SelectValue placeholder={t("setting.select-language")} />
-						</SelectTrigger>
-						<SelectContent className="bg-input-bg-default border">
-							<SelectGroup>
-								<SelectItem value="system">
-									{t("setting.system-default")}
-								</SelectItem>
-								{languageList.map((item) => (
-									<SelectItem key={item.key} value={item.key}>
-										{item.label}
-									</SelectItem>
-								))}
-							</SelectGroup>
-						</SelectContent>
-					</Select>
-				</div>
-			</div>
-			<div className="px-6 py-4 bg-surface-secondary rounded-2xl">
-				<div className="text-base font-bold leading-12 text-text-primary">
-					{t("setting.appearance")}
-				</div>
-				<div className="flex items-center gap-md mt-md">
-					{themeList.map((item: any) => (
-						<div
-							key={item.label}
-							className="hover:cursor-pointer group flex flex-col items-center gap-sm "
-							onClick={() => setAppearance(item.value)}
-						>
-							<img
-								src={item.img}
-								className={`rounded-lg transition-all h-[91.67px] aspect-[183/91.67] border border-solid border-transparent group-hover:border-bg-fill-info-primary ${
-									item.value == appearance ? "border-bg-fill-info-primary" : ""
-								}`}
-								alt=""
-							/>
-							<div
-								className={`text-sm leading-13 text-text-primary group-hover:underline ${
-									item.value == appearance ? "underline" : ""
-								}`}
-							>
-								{t(item.label)}
-							</div>
-						</div>
-					))}
-				</div>
-			</div>
-		</div>
-	);
+    // Validate proxy URL format when non-empty
+    if (trimmed) {
+      try {
+        const parsed = new URL(trimmed);
+        if (
+          !['http:', 'https:', 'socks5:', 'socks4:'].includes(parsed.protocol)
+        ) {
+          toast.error(t('setting.proxy-invalid-url'));
+          return;
+        }
+      } catch {
+        toast.error(t('setting.proxy-invalid-url'));
+        return;
+      }
+    }
+
+    if (!host?.electronAPI?.envWrite || !host?.electronAPI?.envRemove) {
+      toast.error(t('setting.proxy-save-failed'));
+      return;
+    }
+
+    setIsProxySaving(true);
+    try {
+      if (trimmed) {
+        const result = await host.electronAPI.envWrite(authStore.email, {
+          key: 'HTTP_PROXY',
+          value: trimmed,
+        });
+        if (!result?.success) throw new Error('envWrite returned no success');
+      } else {
+        const result = await host.electronAPI.envRemove(
+          authStore.email,
+          'HTTP_PROXY'
+        );
+        if (!result?.success) throw new Error('envRemove returned no success');
+      }
+      setProxyNeedsRestart(true);
+      toast.success(t('setting.proxy-saved-restart-required'));
+    } catch (error) {
+      console.error('Failed to save proxy:', error);
+      toast.error(t('setting.proxy-save-failed'));
+    } finally {
+      setIsProxySaving(false);
+    }
+  };
+
+  return (
+    <div className="m-auto h-auto w-full flex-1">
+      {/* Header Section */}
+      <div className="mx-auto flex w-full max-w-[900px] items-center justify-between px-6 pb-6 pt-8">
+        <div className="flex w-full flex-row items-center justify-between gap-4">
+          <div className="flex flex-col">
+            <div className="text-heading-sm font-bold text-ds-text-neutral-default-default">
+              {t('setting.general')}
+            </div>
+          </div>
+        </div>
+      </div>
+      {/* Content Section */}
+      <div className="mb-xl flex flex-col gap-6">
+        {/* Profile Section */}
+        <div className="item-center flex flex-row justify-between rounded-2xl bg-ds-bg-neutral-default-default px-6 py-4">
+          <div className="flex flex-col gap-2">
+            <div className="text-body-base font-bold text-ds-text-neutral-default-default">
+              {t('setting.profile')}
+            </div>
+            <div className="text-body-sm">
+              <Trans
+                i18nKey="setting.you-are-currently-signed-in-with"
+                values={{ email: authStore.email }}
+                components={{
+                  email: (
+                    <span className="text-ds-text-status-splitting-strong-default underline" />
+                  ),
+                }}
+              />
+            </div>
+          </div>
+          <div className="flex items-center gap-sm">
+            <Button
+              onClick={() => {
+                window.location.href = `${SITE_URL}/dashboard?email=${authStore.email}`;
+              }}
+              variant="primary"
+              textWeight="semibold"
+              buttonContent="text"
+              buttonRadius="lg"
+              tone="neutral"
+              size="sm"
+            >
+              <Settings />
+              {t('setting.manage')}
+            </Button>
+            <Button
+              variant="outline"
+              textWeight="semibold"
+              buttonContent="text"
+              buttonRadius="lg"
+              tone="neutral"
+              size="sm"
+              onClick={() => {
+                chatStore?.clearTasks?.();
+
+                resetInstallation(); // Reset installation state for new account
+                setNeedsBackendRestart(true); // Mark that backend is restarting
+
+                authStore.logout();
+                navigate('/login');
+              }}
+            >
+              <LogOut />
+              {t('setting.log-out')}
+            </Button>
+          </div>
+        </div>
+
+        {/* Language Section */}
+        <div className="item-center flex flex-row justify-between rounded-2xl bg-ds-bg-neutral-default-default px-6 py-4">
+          <div className="flex flex-1 items-center">
+            <div className="text-body-base font-bold text-ds-text-neutral-default-default">
+              {t('setting.language')}
+            </div>
+          </div>
+          <Select value={language} onValueChange={switchLanguage}>
+            <SelectTrigger variant="secondary" className="w-48">
+              <SelectValue placeholder={t('setting.select-language')} />
+            </SelectTrigger>
+            <SelectContent className="border bg-input-bg-default">
+              <SelectGroup>
+                <SelectItem value="system">
+                  {t('setting.system-default')}
+                </SelectItem>
+                {languageList.map((item) => (
+                  <SelectItem key={item.key} value={item.key}>
+                    {item.label}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+        </div>
+
+        {/* Network Proxy Section */}
+        <div className="flex flex-col gap-4 rounded-2xl bg-ds-bg-neutral-default-default px-6 py-4">
+          <div className="flex flex-col gap-1">
+            <div className="text-body-base font-bold text-ds-text-neutral-default-default">
+              {t('setting.network-proxy')}
+            </div>
+            <div className="mb-4 text-sm leading-13 text-ds-text-neutral-muted-default">
+              {t('setting.network-proxy-description')}
+            </div>
+          </div>
+          <Input
+            placeholder={t('setting.proxy-placeholder')}
+            value={proxyUrl}
+            onChange={(e) => {
+              setProxyUrl(e.target.value);
+              setProxyNeedsRestart(false);
+            }}
+            className="flex-1"
+            size="default"
+            note={
+              proxyNeedsRestart ? t('setting.proxy-restart-hint') : undefined
+            }
+            trailingButton={
+              <Button
+                variant={proxyNeedsRestart ? 'outline' : 'primary'}
+                size="sm"
+                onClick={
+                  proxyNeedsRestart
+                    ? () => host?.electronAPI?.restartApp()
+                    : handleSaveProxy
+                }
+                disabled={!proxyNeedsRestart && isProxySaving}
+              >
+                {proxyNeedsRestart
+                  ? t('setting.restart-to-apply')
+                  : isProxySaving
+                    ? t('setting.saving')
+                    : t('setting.save')}
+              </Button>
+            }
+          />
+        </div>
+      </div>
+    </div>
+  );
 }

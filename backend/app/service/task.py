@@ -12,21 +12,32 @@
 # limitations under the License.
 # ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 
-from typing_extensions import Any, Literal, TypedDict
-from typing import List, Dict, Optional
-from pydantic import BaseModel
-from app.exception.exception import ProgramException
-from app.model.chat import AgentModelConfig, McpServers, Status, SupplementChat, Chat, UpdateData
 import asyncio
-from enum import Enum
-from camel.tasks import Task
+import logging
+import weakref
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timedelta
-import weakref
-import logging
+from enum import Enum
+from typing import Any, Literal
+
+from camel.tasks import Task
+from pydantic import BaseModel
+from typing_extensions import TypedDict
+
+from app.exception.exception import ProgramException
+from app.model.chat import (
+    AgentModelConfig,
+    McpServers,
+    SupplementChat,
+    UpdateData,
+)
+from app.model.enums import Status
+from app.run_context import RunContext
 
 logger = logging.getLogger("task_service")
+
+TASK_LOCK_CLEANUP_SENTINEL = "__task_lock_cleanup__"
 
 
 class Action(str, Enum):
@@ -34,12 +45,14 @@ class Action(str, Enum):
     update_task = "update_task"  # user -> backend
     task_state = "task_state"  # backend -> user
     new_task_state = "new_task_state"  # backend -> user
-    decompose_progress = "decompose_progress"  # backend -> user (streaming decomposition)
+    # backend -> user (streaming decomposition)
+    decompose_progress = "decompose_progress"
     decompose_text = "decompose_text"  # backend -> user (raw streaming text)
     start = "start"  # user -> backend
     create_agent = "create_agent"  # backend -> user
     activate_agent = "activate_agent"  # backend -> user
     deactivate_agent = "deactivate_agent"  # backend -> user
+    request_usage = "request_usage"  # backend -> user
     assign_task = "assign_task"  # backend -> user
     activate_toolkit = "activate_toolkit"  # backend -> user
     deactivate_toolkit = "deactivate_toolkit"  # backend -> user
@@ -49,6 +62,7 @@ class Action(str, Enum):
     search_mcp = "search_mcp"  # backend -> user
     install_mcp = "install_mcp"  # backend -> user
     terminal = "terminal"  # backend -> user
+    todo_state = "todo_state"  # backend -> user
     end = "end"  # backend -> user
     stop = "stop"  # user -> backend
     supplement = "supplement"  # user -> backend
@@ -62,9 +76,17 @@ class Action(str, Enum):
     timeout = "timeout"  # backend -> user (task timeout error)
 
 
+class ImprovePayload(BaseModel):
+    """User input payload for an improve action."""
+
+    question: str
+    attaches: list[str] = []
+    project_context: str | None = None
+
+
 class ActionImproveData(BaseModel):
     action: Literal[Action.improve] = Action.improve
-    data: str
+    data: ImprovePayload
     new_task_id: str | None = None
 
 
@@ -79,7 +101,10 @@ class ActionUpdateTaskData(BaseModel):
 
 class ActionTaskStateData(BaseModel):
     action: Literal[Action.task_state] = Action.task_state
-    data: dict[Literal["task_id", "content", "state", "result", "failure_count"], str | int]
+    data: dict[
+        Literal["task_id", "content", "state", "result", "failure_count"],
+        str | int,
+    ]
 
 
 class ActionDecomposeProgressData(BaseModel):
@@ -94,7 +119,10 @@ class ActionDecomposeTextData(BaseModel):
 
 class ActionNewTaskStateData(BaseModel):
     action: Literal[Action.new_task_state] = Action.new_task_state
-    data: dict[Literal["task_id", "content", "state", "result", "failure_count"], str | int]
+    data: dict[
+        Literal["task_id", "content", "state", "result", "failure_count"],
+        str | int,
+    ]
 
 
 class ActionAskData(BaseModel):
@@ -115,7 +143,9 @@ class ActionCreateAgentData(BaseModel):
 
 class ActionActivateAgentData(BaseModel):
     action: Literal[Action.activate_agent] = Action.activate_agent
-    data: dict[Literal["agent_name", "process_task_id", "agent_id", "message"], str]
+    data: dict[
+        Literal["agent_name", "process_task_id", "agent_id", "message"], str
+    ]
 
 
 class DataDict(TypedDict):
@@ -131,15 +161,39 @@ class ActionDeactivateAgentData(BaseModel):
     data: DataDict
 
 
+class RequestUsageDataDict(TypedDict):
+    agent_name: str
+    agent_id: str
+    process_task_id: str
+    tokens: int
+    request_index: int
+    response_id: str
+    step_total_tokens: int
+
+
+class ActionRequestUsageData(BaseModel):
+    action: Literal[Action.request_usage] = Action.request_usage
+    data: RequestUsageDataDict
+
+
 class ActionAssignTaskData(BaseModel):
     action: Literal[Action.assign_task] = Action.assign_task
-    data: dict[Literal["assignee_id", "task_id", "content", "state", "failure_count"], str | int]
+    data: dict[
+        Literal["assignee_id", "task_id", "content", "state", "failure_count"],
+        str | int,
+    ]
 
 
 class ActionActivateToolkitData(BaseModel):
     action: Literal[Action.activate_toolkit] = Action.activate_toolkit
     data: dict[
-        Literal["agent_name", "toolkit_name", "process_task_id", "method_name", "message"],
+        Literal[
+            "agent_name",
+            "toolkit_name",
+            "process_task_id",
+            "method_name",
+            "message",
+        ],
         str,
     ]
 
@@ -147,7 +201,13 @@ class ActionActivateToolkitData(BaseModel):
 class ActionDeactivateToolkitData(BaseModel):
     action: Literal[Action.deactivate_toolkit] = Action.deactivate_toolkit
     data: dict[
-        Literal["agent_name", "toolkit_name", "process_task_id", "method_name", "message"],
+        Literal[
+            "agent_name",
+            "toolkit_name",
+            "process_task_id",
+            "method_name",
+            "message",
+        ],
         str,
     ]
 
@@ -180,6 +240,11 @@ class ActionTerminalData(BaseModel):
     data: str
 
 
+class ActionTodoStateData(BaseModel):
+    action: Literal[Action.todo_state] = Action.todo_state
+    data: dict
+
+
 class ActionStopData(BaseModel):
     action: Literal[Action.stop] = Action.stop
 
@@ -190,7 +255,12 @@ class ActionEndData(BaseModel):
 
 class ActionTimeoutData(BaseModel):
     action: Literal[Action.timeout] = Action.timeout
-    data: dict[Literal["message", "in_flight_tasks", "pending_tasks", "timeout_seconds"], str | int]
+    data: dict[
+        Literal[
+            "message", "in_flight_tasks", "pending_tasks", "timeout_seconds"
+        ],
+        str | int,
+    ]
 
 
 class ActionSupplementData(BaseModel):
@@ -244,6 +314,7 @@ ActionData = (
     | ActionCreateAgentData
     | ActionActivateAgentData
     | ActionDeactivateAgentData
+    | ActionRequestUsageData
     | ActionAssignTaskData
     | ActionActivateToolkitData
     | ActionDeactivateToolkitData
@@ -252,6 +323,7 @@ ActionData = (
     | ActionSearchMcpData
     | ActionInstallMcpData
     | ActionTerminalData
+    | ActionTodoStateData
     | ActionStopData
     | ActionEndData
     | ActionTimeoutData
@@ -275,8 +347,9 @@ class Agents(str, Enum):
     browser_agent = "browser_agent"
     document_agent = "document_agent"
     multi_modal_agent = "multi_modal_agent"
-    social_medium_agent = "social_medium_agent"
+    social_media_agent = "social_media_agent"
     mcp_agent = "mcp_agent"
+    single_agent = "single_agent"
 
 
 class TaskLock:
@@ -287,7 +360,8 @@ class TaskLock:
     queue: asyncio.Queue[ActionData]
     """Queue monitoring for SSE response"""
     human_input: dict[str, asyncio.Queue[str]]
-    """After receiving user's reply, put the reply into the corresponding agent's queue"""
+    """After receiving user's reply, put the reply into the
+    corresponding agent's queue"""
     created_at: datetime
     last_accessed: datetime
     background_tasks: set[asyncio.Task]
@@ -296,18 +370,52 @@ class TaskLock:
     """Track toolkits for cleanup (e.g., TerminalToolkit venvs)"""
 
     # Context management fields
-    conversation_history: List[Dict[str, Any]]
+    conversation_history: list[dict[str, Any]]
     """Store conversation history for context"""
+    agent_memory_history: list[dict[str, Any]]
+    """Serialized ChatAgent memory snapshots for session continuity"""
+    memory_summary: str
+    """Compressed summary of older serialized agent memory"""
     last_task_result: str
     """Store the last task execution result"""
-    question_agent: Optional[Any]
+    last_task_summary: str
+    """Store the last generated task summary"""
+    question_agent: Any | None
     """Persistent question confirmation agent"""
     summary_generated: bool
     """Track if summary has been generated for this project"""
-    current_task_id: Optional[str]
+    current_task_id: str | None
     """Current task ID to be used in SSE responses"""
+    run_context: RunContext | None
+    """Current task-scoped runtime context for this Project."""
+    user_id: str | int | None
+    """Canonical user id when provided by the control plane."""
+    working_directory: str | None
+    """Resolved source/work directory for the current Run."""
+    task_output_root: str | None
+    """Resolved artifact/output directory for the current Run."""
+    task_start_time: float | None
+    """Timestamp captured when the current Run directories were frozen."""
+    email: str | None
+    """Legacy/display user email associated with the current Run."""
+    project_id: str | None
+    """Project id associated with the current Run."""
+    space_id: str | None
+    """Space id associated with the current Run."""
+    workdir_mode: str | None
+    """Actual workdir mode used by the current Run."""
+    base_snapshot_id: str | None
+    """Project workdir baseline snapshot id, when available."""
+    new_folder_path: Any | None
+    """Legacy cleanup marker for default output directories."""
+    memory_service: Any | None
+    """MemoryService bound for this Run; used by single_agent_service for on_run_end."""
+    _memory_finalized_runs: set[str]
+    """Run ids whose durable memory lifecycle has already been finalized."""
 
-    def __init__(self, id: str, queue: asyncio.Queue, human_input: dict) -> None:
+    def __init__(
+        self, id: str, queue: asyncio.Queue, human_input: dict
+    ) -> None:
         self.id = id
         self.queue = queue
         self.human_input = human_input
@@ -318,44 +426,92 @@ class TaskLock:
 
         # Initialize context management fields
         self.conversation_history = []
+        self.agent_memory_history = []
+        self.memory_summary = ""
         self.last_task_result = ""
         self.last_task_summary = ""
         self.question_agent = None
+        self.summary_generated = False
         self.current_task_id = None
+        self.run_context = None
+        self.user_id = None
+        self.working_directory = None
+        self.task_output_root = None
+        self.task_start_time = None
+        self.email = None
+        self.project_id = None
+        self.space_id = None
+        self.workdir_mode = None
+        self.base_snapshot_id = None
+        self.new_folder_path = None
+        self.memory_service = None
+        self._memory_finalized_runs = set()
 
-        logger.info("Task lock initialized", extra={"task_id": id, "created_at": self.created_at.isoformat()})
+        logger.info(
+            "Task lock initialized",
+            extra={"task_id": id, "created_at": self.created_at.isoformat()},
+        )
 
     async def put_queue(self, data: ActionData):
         self.last_accessed = datetime.now()
-        logger.debug("Adding item to task queue", extra={"task_id": self.id, "action": data.action})
+        logger.debug(
+            "Adding item to task queue",
+            extra={"task_id": self.id, "action": data.action},
+        )
         await self.queue.put(data)
 
     async def get_queue(self):
         self.last_accessed = datetime.now()
-        logger.debug("Getting item from task queue", extra={"task_id": self.id})
+        logger.debug(
+            "Getting item from task queue", extra={"task_id": self.id}
+        )
         return await self.queue.get()
 
     async def put_human_input(self, agent: str, data: Any = None):
-        logger.debug("Adding human input", extra={"task_id": self.id, "agent": agent, "has_data": data is not None})
+        logger.debug(
+            "Adding human input",
+            extra={
+                "task_id": self.id,
+                "agent": agent,
+                "has_data": data is not None,
+            },
+        )
         await self.human_input[agent].put(data)
 
     async def get_human_input(self, agent: str):
-        logger.debug("Getting human input", extra={"task_id": self.id, "agent": agent})
+        logger.debug(
+            "Getting human input", extra={"task_id": self.id, "agent": agent}
+        )
         return await self.human_input[agent].get()
 
     def add_human_input_listen(self, agent: str):
-        logger.debug("Adding human input listener", extra={"task_id": self.id, "agent": agent})
+        logger.debug(
+            "Adding human input listener",
+            extra={"task_id": self.id, "agent": agent},
+        )
         self.human_input[agent] = asyncio.Queue(1)
 
     def add_background_task(self, task: asyncio.Task) -> None:
         r"""Add a task to track and clean up weak references"""
-        logger.debug("Adding background task", extra={"task_id": self.id, "background_tasks_count": len(self.background_tasks)})
+        logger.debug(
+            "Adding background task",
+            extra={
+                "task_id": self.id,
+                "background_tasks_count": len(self.background_tasks),
+            },
+        )
         self.background_tasks.add(task)
         task.add_done_callback(lambda t: self.background_tasks.discard(t))
 
     async def cleanup(self):
         r"""Cancel all background tasks and clean up resources"""
-        logger.info("Starting task lock cleanup", extra={"task_id": self.id, "background_tasks_count": len(self.background_tasks)})
+        logger.info(
+            "Starting task lock cleanup",
+            extra={
+                "task_id": self.id,
+                "background_tasks_count": len(self.background_tasks),
+            },
+        )
         for task in list(self.background_tasks):
             if not task.done():
                 task.cancel()
@@ -364,17 +520,39 @@ class TaskLock:
                 except asyncio.CancelledError:
                     pass
         self.background_tasks.clear()
-        
+
+        # Unblock agents waiting on human input so shutdown can proceed.
+        for agent, queue in self.human_input.items():
+            try:
+                queue.put_nowait(TASK_LOCK_CLEANUP_SENTINEL)
+            except asyncio.QueueFull:
+                logger.debug(
+                    "Human input queue already full during cleanup",
+                    extra={"task_id": self.id, "agent": agent},
+                )
+
         # Clean up registered toolkits (e.g., remove TerminalToolkit venvs)
         for toolkit in self.registered_toolkits:
             try:
-                if hasattr(toolkit, 'cleanup'):
+                if hasattr(toolkit, "cleanup"):
                     toolkit.cleanup()
-                    logger.info("Toolkit cleanup completed", extra={"task_id": self.id, "toolkit": type(toolkit).__name__})
+                    logger.info(
+                        "Toolkit cleanup completed",
+                        extra={
+                            "task_id": self.id,
+                            "toolkit": type(toolkit).__name__,
+                        },
+                    )
             except Exception as e:
-                logger.warning(f"Failed to cleanup toolkit: {e}", extra={"task_id": self.id, "toolkit": type(toolkit).__name__})
+                logger.warning(
+                    f"Failed to cleanup toolkit: {e}",
+                    extra={
+                        "task_id": self.id,
+                        "toolkit": type(toolkit).__name__,
+                    },
+                )
         self.registered_toolkits.clear()
-        
+
         logger.info("Task lock cleanup completed", extra={"task_id": self.id})
 
     def register_toolkit(self, toolkit: Any) -> None:
@@ -387,27 +565,51 @@ class TaskLock:
         """
         # Prevent duplicate registration of the same toolkit instance
         if any(t is toolkit for t in self.registered_toolkits):
-            logger.debug("Toolkit already registered, skipping", extra={
-                "task_id": self.id,
-                "toolkit": type(toolkit).__name__
-            })
+            logger.debug(
+                "Toolkit already registered, skipping",
+                extra={"task_id": self.id, "toolkit": type(toolkit).__name__},
+            )
             return
 
         self.registered_toolkits.append(toolkit)
-        logger.debug("Toolkit registered for cleanup", extra={
-            "task_id": self.id,
-            "toolkit": type(toolkit).__name__,
-            "total_registered": len(self.registered_toolkits)
-        })
+        logger.debug(
+            "Toolkit registered for cleanup",
+            extra={
+                "task_id": self.id,
+                "toolkit": type(toolkit).__name__,
+                "total_registered": len(self.registered_toolkits),
+            },
+        )
 
     def add_conversation(self, role: str, content: str | dict):
         """Add a conversation entry to history"""
-        logger.debug("Adding conversation entry", extra={"task_id": self.id, "role": role, "content_length": len(str(content))})
-        self.conversation_history.append({
-            'role': role,
-            'content': content,
-            'timestamp': datetime.now().isoformat()
-        })
+        logger.debug(
+            "Adding conversation entry",
+            extra={
+                "task_id": self.id,
+                "role": role,
+                "content_length": len(str(content)),
+            },
+        )
+        self.conversation_history.append(
+            {
+                "role": role,
+                "content": content,
+                "timestamp": datetime.now().isoformat(),
+            }
+        )
+
+    def add_agent_memory_snapshot(self, snapshot: dict[str, Any]) -> None:
+        logger.debug(
+            "Adding agent memory snapshot",
+            extra={
+                "task_id": self.id,
+                "scope": snapshot.get("scope"),
+                "agent_name": snapshot.get("agent_name"),
+                "message_count": len(snapshot.get("messages", [])),
+            },
+        )
+        self.agent_memory_history.append(snapshot)
 
     def get_recent_context(self, max_entries: int = None) -> str:
         """Get recent conversation context as a formatted string"""
@@ -415,7 +617,10 @@ class TaskLock:
             return ""
 
         context = "=== Recent Conversation ===\n"
-        history_to_use = self.conversation_history if max_entries is None else self.conversation_history[-max_entries:]
+        if max_entries is None:
+            history_to_use = self.conversation_history
+        else:
+            history_to_use = self.conversation_history[-max_entries:]
         for entry in history_to_use:
             context += f"{entry['role']}: {entry['content']}\n"
         return context
@@ -444,12 +649,18 @@ def set_current_task_id(project_id: str, task_id: str) -> None:
     """Set the current task ID for a project's task lock"""
     task_lock = get_task_lock(project_id)
     task_lock.current_task_id = task_id
-    logger.info("Updated current task ID", extra={"project_id": project_id, "task_id": task_id})
+    logger.info(
+        "Updated current task ID",
+        extra={"project_id": project_id, "task_id": task_id},
+    )
 
 
 def create_task_lock(id: str) -> TaskLock:
     if id in task_locks:
-        logger.warning("Attempting to create task lock that already exists", extra={"task_id": id})
+        logger.warning(
+            "Attempting to create task lock that already exists",
+            extra={"task_id": id},
+        )
         raise ProgramException("Task already exists")
 
     logger.info("Creating new task lock", extra={"task_id": id})
@@ -460,7 +671,10 @@ def create_task_lock(id: str) -> TaskLock:
     # if _cleanup_task is None or _cleanup_task.done():
     #     _cleanup_task = asyncio.create_task(_periodic_cleanup())
 
-    logger.info("Task lock created successfully", extra={"task_id": id, "total_task_locks": len(task_locks)})
+    logger.info(
+        "Task lock created successfully",
+        extra={"task_id": id, "total_task_locks": len(task_locks)},
+    )
     return task_locks[id]
 
 
@@ -475,16 +689,28 @@ def get_or_create_task_lock(id: str) -> TaskLock:
 
 async def delete_task_lock(id: str):
     if id not in task_locks:
-        logger.warning("Attempting to delete non-existent task lock", extra={"task_id": id})
+        logger.warning(
+            "Attempting to delete non-existent task lock",
+            extra={"task_id": id},
+        )
         raise ProgramException("Task not found")
 
     # Clean up background tasks before deletion
     task_lock = task_locks[id]
-    logger.info("Cleaning up task lock", extra={"task_id": id, "background_tasks": len(task_lock.background_tasks)})
+    logger.info(
+        "Cleaning up task lock",
+        extra={
+            "task_id": id,
+            "background_tasks": len(task_lock.background_tasks),
+        },
+    )
     await task_lock.cleanup()
 
     del task_locks[id]
-    logger.info("Task lock deleted successfully", extra={"task_id": id, "remaining_task_locks": len(task_locks)})
+    logger.info(
+        "Task lock deleted successfully",
+        extra={"task_id": id, "remaining_task_locks": len(task_locks)},
+    )
 
 
 def get_camel_task(id: str, tasks: list[Task]) -> None | Task:
@@ -518,7 +744,9 @@ async def _periodic_cleanup():
             await asyncio.sleep(300)  # Run every 5 minutes
 
             current_time = datetime.now()
-            stale_timeout = timedelta(hours=4)  # Consider tasks stale after 4 hours
+            stale_timeout = timedelta(
+                hours=4
+            )  # Consider tasks stale after 4 hours
 
             stale_ids = []
             for task_id, task_lock in task_locks.items():

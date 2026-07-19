@@ -14,18 +14,21 @@
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
-import pytest
 
+import pytest
 from camel.agents import ChatAgent
 from camel.agents._types import ToolCallRequest
 from camel.messages import BaseMessage
+from camel.models import ModelProcessingError
 from camel.responses import ChatAgentResponse
 from camel.toolkits import FunctionTool
 from camel.types.agents import ToolCallingRecord
 
 from app.agent.listen_chat_agent import ListenChatAgent
 from app.model.chat import Chat
+from app.service.task import process_task
 
+_LCA = "app.agent.listen_chat_agent"
 
 pytestmark = pytest.mark.unit
 
@@ -38,8 +41,10 @@ class TestListenChatAgent:
         api_task_id = "test_api_task_123"
         agent_name = "TestAgent"
 
-        with patch('app.agent.listen_chat_agent.get_task_lock') as mock_get_lock, \
-             patch('camel.models.ModelFactory.create') as mock_create_model:
+        with (
+            patch(f"{_LCA}.get_task_lock") as mock_get_lock,
+            patch("camel.models.ModelFactory.create") as mock_create_model,
+        ):
             mock_task_lock = MagicMock()
             mock_get_lock.return_value = mock_task_lock
 
@@ -56,7 +61,7 @@ class TestListenChatAgent:
                 model="gpt-4",  # Use string instead of mock
                 system_message="You are a helpful assistant",
                 tools=[],
-                agent_id="test_agent_123"
+                agent_id="test_agent_123",
             )
 
             assert agent.api_task_id == api_task_id
@@ -68,10 +73,11 @@ class TestListenChatAgent:
         api_task_id = "test_api_task_123"
         agent_name = "TestAgent"
 
-        with patch('app.agent.listen_chat_agent.get_task_lock', return_value=mock_task_lock), \
-             patch('camel.models.ModelFactory.create') as mock_create_model, \
-             patch('asyncio.create_task') as mock_create_task:
-
+        with (
+            patch(f"{_LCA}.get_task_lock", return_value=mock_task_lock),
+            patch("camel.models.ModelFactory.create") as mock_create_model,
+            patch("asyncio.create_task"),
+        ):
             # Mock the model backend creation
             mock_backend = MagicMock()
             mock_backend.model_type = "gpt-4"
@@ -80,9 +86,7 @@ class TestListenChatAgent:
             mock_create_model.return_value = mock_backend
 
             agent = ListenChatAgent(
-                api_task_id=api_task_id,
-                agent_name=agent_name,
-                model="gpt-4"
+                api_task_id=api_task_id, agent_name=agent_name, model="gpt-4"
             )
             agent.process_task_id = "test_process_task"
 
@@ -92,26 +96,127 @@ class TestListenChatAgent:
             mock_response.msg.content = "Test response content"
             mock_response.info = {"usage": {"total_tokens": 100}}
 
-            with patch.object(ChatAgent, 'step', return_value=mock_response) as mock_parent_step:
+            with patch.object(
+                ChatAgent, "step", return_value=mock_response
+            ) as mock_parent_step:
                 result = agent.step("Test input message")
 
                 assert result is mock_response
-                # Check that step was called with the input message (don't assert on response_format param)
+                # Check that step was called with
+                # the input message (don't assert
+                # on response_format param)
                 mock_parent_step.assert_called_once()
                 args, kwargs = mock_parent_step.call_args
                 assert args[0] == "Test input message"
                 # Should queue activation notification
                 mock_task_lock.put_queue.assert_called()
 
-    def test_listen_chat_agent_step_with_base_message_input(self, mock_task_lock):
+    def test_listen_chat_agent_reloads_model_once_on_auth_error(
+        self, mock_task_lock
+    ):
+        """Codex subscription agents can refresh and retry one 401."""
+        api_task_id = "test_api_task_123"
+        agent_name = "TestAgent"
+        reload_callback = MagicMock()
+
+        with (
+            patch(f"{_LCA}.get_task_lock", return_value=mock_task_lock),
+            patch("camel.models.ModelFactory.create") as mock_create_model,
+        ):
+            mock_backend = MagicMock()
+            mock_backend.model_type = "gpt-4"
+            mock_backend.current_model = MagicMock()
+            mock_backend.current_model.model_type = "gpt-4"
+            mock_create_model.return_value = mock_backend
+            reload_callback.return_value = mock_backend
+
+            agent = ListenChatAgent(
+                api_task_id=api_task_id,
+                agent_name=agent_name,
+                model="gpt-4",
+                model_reload_callback=reload_callback,
+            )
+            agent.process_task_id = "test_process_task"
+
+            mock_response = MagicMock(spec=ChatAgentResponse)
+            mock_response.msg = MagicMock()
+            mock_response.msg.content = "Retried response"
+            mock_response.info = {"usage": {"total_tokens": 42}}
+
+            with patch.object(
+                ChatAgent,
+                "step",
+                side_effect=[
+                    ModelProcessingError("401 Unauthorized"),
+                    mock_response,
+                ],
+            ) as mock_parent_step:
+                result = agent.step("Test input message")
+
+            assert result is mock_response
+            assert mock_parent_step.call_count == 2
+            reload_callback.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_listen_chat_agent_async_reloads_model_once_on_auth_error(
+        self, mock_task_lock
+    ):
+        api_task_id = "test_api_task_123"
+        agent_name = "TestAgent"
+        reload_callback = MagicMock()
+
+        with (
+            patch(f"{_LCA}.get_task_lock", return_value=mock_task_lock),
+            patch("camel.models.ModelFactory.create") as mock_create_model,
+        ):
+            mock_backend = MagicMock()
+            mock_backend.model_type = "gpt-4"
+            mock_backend.current_model = MagicMock()
+            mock_backend.current_model.model_type = "gpt-4"
+            mock_create_model.return_value = mock_backend
+            reload_callback.return_value = mock_backend
+
+            agent = ListenChatAgent(
+                api_task_id=api_task_id,
+                agent_name=agent_name,
+                model="gpt-4",
+                model_reload_callback=reload_callback,
+            )
+            agent.process_task_id = "test_process_task"
+
+            mock_response = MagicMock()
+            mock_response.msg = MagicMock()
+            mock_response.msg.content = "Retried async response"
+            mock_response.info = {"usage": {"total_tokens": 43}}
+
+            with patch.object(
+                ChatAgent,
+                "astep",
+                new=AsyncMock(
+                    side_effect=[
+                        ModelProcessingError("401 Unauthorized"),
+                        mock_response,
+                    ]
+                ),
+            ) as mock_parent_astep:
+                result = await agent.astep("Test async input")
+
+            assert result is mock_response
+            assert mock_parent_astep.call_count == 2
+            reload_callback.assert_called_once()
+
+    def test_listen_chat_agent_step_with_base_message_input(
+        self, mock_task_lock
+    ):
         """Test ListenChatAgent step method with BaseMessage input."""
         api_task_id = "test_api_task_123"
         agent_name = "TestAgent"
 
-        with patch('app.agent.listen_chat_agent.get_task_lock', return_value=mock_task_lock), \
-             patch('camel.models.ModelFactory.create') as mock_create_model, \
-             patch('asyncio.create_task') as mock_create_task:
-
+        with (
+            patch(f"{_LCA}.get_task_lock", return_value=mock_task_lock),
+            patch("camel.models.ModelFactory.create") as mock_create_model,
+            patch("asyncio.create_task"),
+        ):
             # Mock the model backend creation
             mock_backend = MagicMock()
             mock_backend.model_type = "gpt-4"
@@ -120,9 +225,7 @@ class TestListenChatAgent:
             mock_create_model.return_value = mock_backend
 
             agent = ListenChatAgent(
-                api_task_id=api_task_id,
-                agent_name=agent_name,
-                model="gpt-4"
+                api_task_id=api_task_id, agent_name=agent_name, model="gpt-4"
             )
             agent.agent_id = "test_agent_456"
             agent.process_task_id = "test_process_task"
@@ -137,18 +240,24 @@ class TestListenChatAgent:
             mock_response.msg.content = "Test response content"
             mock_response.info = {"usage": {"total_tokens": 100}}
 
-            with patch.object(ChatAgent, 'step', return_value=mock_response) as mock_parent_step:
+            with patch.object(
+                ChatAgent, "step", return_value=mock_response
+            ) as mock_parent_step:
                 result = agent.step(mock_message)
 
                 assert result is mock_response
-                # Check that step was called with the mock message (don't assert on response_format param)
+                # Check that step was called with
+                # the mock message (don't assert
+                # on response_format param)
                 mock_parent_step.assert_called_once()
                 args, kwargs = mock_parent_step.call_args
                 assert args[0] is mock_message
 
                 # Should queue activation with message content
                 mock_task_lock.put_queue.assert_called()
-                # Just verify put_queue was called - don't check internal data structure details
+                # Just verify put_queue was called -
+                # don't check internal data
+                # structure details
 
     @pytest.mark.asyncio
     async def test_listen_chat_agent_astep(self, mock_task_lock):
@@ -156,10 +265,11 @@ class TestListenChatAgent:
         api_task_id = "test_api_task_123"
         agent_name = "TestAgent"
 
-        with patch('app.agent.listen_chat_agent.get_task_lock', return_value=mock_task_lock), \
-             patch('camel.models.ModelFactory.create') as mock_create_model, \
-             patch('asyncio.create_task') as mock_create_task:
-
+        with (
+            patch(f"{_LCA}.get_task_lock", return_value=mock_task_lock),
+            patch("camel.models.ModelFactory.create") as mock_create_model,
+            patch("asyncio.create_task"),
+        ):
             # Mock the model backend creation
             mock_backend = MagicMock()
             mock_backend.model_type = "gpt-4"
@@ -168,9 +278,7 @@ class TestListenChatAgent:
             mock_create_model.return_value = mock_backend
 
             agent = ListenChatAgent(
-                api_task_id=api_task_id,
-                agent_name=agent_name,
-                model="gpt-4"
+                api_task_id=api_task_id, agent_name=agent_name, model="gpt-4"
             )
             agent.process_task_id = "test_process_task"
 
@@ -180,11 +288,15 @@ class TestListenChatAgent:
             mock_response.msg.content = "Test response message"
             mock_response.info = {"usage": {"total_tokens": 100}}
 
-            with patch.object(ChatAgent, 'astep', return_value=mock_response) as mock_parent_astep:
+            with patch.object(
+                ChatAgent, "astep", return_value=mock_response
+            ) as mock_parent_astep:
                 result = await agent.astep("Test async input")
 
                 assert result is mock_response
-                # Check that astep was called with the input message (don't assert on response_format param)
+                # Check that astep was called with
+                # the input message (don't assert
+                # on response_format param)
                 mock_parent_astep.assert_called_once()
                 args, kwargs = mock_parent_astep.call_args
                 assert args[0] == "Test async input"
@@ -197,10 +309,11 @@ class TestListenChatAgent:
         api_task_id = "test_api_task_123"
         agent_name = "TestAgent"
 
-        with patch('app.agent.listen_chat_agent.get_task_lock', return_value=mock_task_lock), \
-             patch('camel.models.ModelFactory.create') as mock_create_model, \
-             patch('asyncio.create_task') as mock_create_task:
-
+        with (
+            patch(f"{_LCA}.get_task_lock", return_value=mock_task_lock),
+            patch("camel.models.ModelFactory.create") as mock_create_model,
+            patch("asyncio.create_task"),
+        ):
             # Mock the model backend creation
             mock_backend = MagicMock()
             mock_backend.model_type = "gpt-4"
@@ -209,9 +322,7 @@ class TestListenChatAgent:
             mock_create_model.return_value = mock_backend
 
             agent = ListenChatAgent(
-                api_task_id=api_task_id,
-                agent_name=agent_name,
-                model="gpt-4"
+                api_task_id=api_task_id, agent_name=agent_name, model="gpt-4"
             )
 
             # Create a mock tool and add it to _internal_tools
@@ -231,13 +342,16 @@ class TestListenChatAgent:
             # Mock tool calling record
             mock_record = MagicMock(spec=ToolCallingRecord)
 
-            with patch.object(agent, '_record_tool_calling', return_value=mock_record) as mock_record_func:
+            with patch.object(
+                agent, "_record_tool_calling", return_value=mock_record
+            ) as mock_record_func:
                 result = agent._execute_tool(tool_call_request)
 
                 assert result is mock_record
                 mock_record_func.assert_called_once()
 
-                # Should queue toolkit activation and deactivation notifications
+                # Should queue toolkit activation
+                # and deactivation notifications
                 assert mock_task_lock.put_queue.call_count >= 2
 
     @pytest.mark.asyncio
@@ -246,9 +360,10 @@ class TestListenChatAgent:
         api_task_id = "test_api_task_123"
         agent_name = "TestAgent"
 
-        with patch('app.agent.listen_chat_agent.get_task_lock', return_value=mock_task_lock), \
-             patch('camel.models.ModelFactory.create') as mock_create_model:
-
+        with (
+            patch(f"{_LCA}.get_task_lock", return_value=mock_task_lock),
+            patch("camel.models.ModelFactory.create") as mock_create_model,
+        ):
             # Mock the model backend creation
             mock_backend = MagicMock()
             mock_backend.model_type = "gpt-4"
@@ -257,9 +372,7 @@ class TestListenChatAgent:
             mock_create_model.return_value = mock_backend
 
             agent = ListenChatAgent(
-                api_task_id=api_task_id,
-                agent_name=agent_name,
-                model="gpt-4"
+                api_task_id=api_task_id, agent_name=agent_name, model="gpt-4"
             )
 
             # Create a mock tool and add it to _internal_tools
@@ -277,42 +390,98 @@ class TestListenChatAgent:
 
             mock_record = MagicMock(spec=ToolCallingRecord)
 
-            with patch.object(agent, '_record_tool_calling', return_value=mock_record) as mock_record_func:
+            with patch.object(
+                agent, "_record_tool_calling", return_value=mock_record
+            ) as mock_record_func:
                 result = await agent._aexecute_tool(tool_call_request)
 
                 assert result is mock_record
                 mock_record_func.assert_called_once()
 
-                # Should queue toolkit activation and deactivation notifications
+                # Should queue toolkit activation
+                # and deactivation notifications
                 assert mock_task_lock.put_queue.call_count >= 2
+
+    @pytest.mark.asyncio
+    async def test_streaming_tool_execution_preserves_process_task_context(
+        self, mock_task_lock
+    ):
+        """Streaming tool calls should use the current follow-up task id."""
+        api_task_id = "test_api_task_123"
+        agent_name = "TestAgent"
+        observed_process_task_ids: list[str] = []
+
+        class SyncTool:
+            is_async = False
+
+            def func(self):
+                return None
+
+            def __call__(self, **kwargs):
+                observed_process_task_ids.append(process_task.get(""))
+                return f"ok:{kwargs['arg1']}"
+
+        with (
+            patch(f"{_LCA}.get_task_lock", return_value=mock_task_lock),
+            patch("camel.models.ModelFactory.create") as mock_create_model,
+        ):
+            mock_backend = MagicMock()
+            mock_backend.model_type = "gpt-4"
+            mock_backend.current_model = MagicMock()
+            mock_backend.current_model.model_type = "gpt-4"
+            mock_create_model.return_value = mock_backend
+
+            agent = ListenChatAgent(
+                api_task_id=api_task_id, agent_name=agent_name, model="gpt-4"
+            )
+            agent.process_task_id = "follow_up_task_123"
+            agent._internal_tools = {"stream_tool": SyncTool()}
+
+            result = await agent._aexecute_tool_from_stream_data(
+                {
+                    "id": "stream_tool_call_123",
+                    "function": {
+                        "name": "stream_tool",
+                        "arguments": '{"arg1": "value1"}',
+                    },
+                }
+            )
+
+            assert result is not None
+            assert result.tool_name == "stream_tool"
+            assert result.result == "ok:value1"
+            assert observed_process_task_ids == ["follow_up_task_123"]
+            assert mock_task_lock.put_queue.call_count >= 2
 
     def test_listen_chat_agent_clone(self, mock_task_lock):
         """Test ListenChatAgent clone method."""
         api_task_id = "test_api_task_123"
         agent_name = "TestAgent"
 
-        with patch('app.agent.listen_chat_agent.get_task_lock', return_value=mock_task_lock), \
-             patch('camel.models.ModelFactory.create') as mock_create_model:
-
+        with (
+            patch(f"{_LCA}.get_task_lock", return_value=mock_task_lock),
+            patch("camel.models.ModelFactory.create") as mock_create_model,
+        ):
             # Mock the model backend creation
             mock_backend = MagicMock()
             mock_backend.model_type = "gpt-4"
             mock_backend.current_model = MagicMock()
             mock_backend.current_model.model_type = "gpt-4"
-            mock_backend.models = "gpt-4"  # String instead of list to avoid list processing
+            # String instead of list to avoid
+            # list processing
+            mock_backend.models = "gpt-4"
             mock_backend.scheduling_strategy = MagicMock()
             mock_backend.scheduling_strategy.__name__ = "round_robin"
             mock_create_model.return_value = mock_backend
 
-            # Mock the clone process by patching ListenChatAgent constructor for clone
+            # Mock the clone process by patching
+            # ListenChatAgent constructor for clone
             cloned_agent = MagicMock()
             cloned_agent.process_task_id = "test_process_task"
 
             # First create the initial agent
             agent = ListenChatAgent(
-                api_task_id=api_task_id,
-                agent_name=agent_name,
-                model="gpt-4"
+                api_task_id=api_task_id, agent_name=agent_name, model="gpt-4"
             )
 
             # Set up necessary attributes for cloning
@@ -333,9 +502,12 @@ class TestListenChatAgent:
             agent.prune_tool_calls_from_memory = False
 
             # Now mock the constructor for the clone call
-            with patch('app.agent.listen_chat_agent.ListenChatAgent', return_value=cloned_agent) as mock_clone_constructor, \
-                 patch.object(agent, '_clone_tools', return_value=([], [])):
-
+            with (
+                patch(
+                    f"{_LCA}.ListenChatAgent", return_value=cloned_agent
+                ) as mock_clone_constructor,
+                patch.object(agent, "_clone_tools", return_value=([], [])),
+            ):
                 result = agent.clone(with_memory=True)
 
                 assert result is cloned_agent
@@ -350,9 +522,10 @@ class TestListenChatAgent:
         mock_tool = MagicMock(spec=FunctionTool)
         tools = [mock_tool]
 
-        with patch('app.agent.listen_chat_agent.get_task_lock', return_value=mock_task_lock), \
-             patch('camel.models.ModelFactory.create') as mock_create_model:
-
+        with (
+            patch(f"{_LCA}.get_task_lock", return_value=mock_task_lock),
+            patch("camel.models.ModelFactory.create") as mock_create_model,
+        ):
             # Mock the model backend creation
             mock_backend = MagicMock()
             mock_backend.model_type = "gpt-4"
@@ -364,7 +537,7 @@ class TestListenChatAgent:
                 api_task_id=api_task_id,
                 agent_name=agent_name,
                 model="gpt-4",
-                tools=tools
+                tools=tools,
             )
 
             # Mock function_list attribute that is expected to exist
@@ -381,9 +554,10 @@ class TestListenChatAgent:
 
         pause_event = asyncio.Event()
 
-        with patch('app.agent.listen_chat_agent.get_task_lock', return_value=mock_task_lock), \
-             patch('camel.models.ModelFactory.create') as mock_create_model:
-
+        with (
+            patch(f"{_LCA}.get_task_lock", return_value=mock_task_lock),
+            patch("camel.models.ModelFactory.create") as mock_create_model,
+        ):
             # Mock the model backend creation
             mock_backend = MagicMock()
             mock_backend.model_type = "gpt-4"
@@ -395,7 +569,7 @@ class TestListenChatAgent:
                 api_task_id=api_task_id,
                 agent_name=agent_name,
                 model="gpt-4",
-                pause_event=pause_event
+                pause_event=pause_event,
             )
 
             assert agent.pause_event is pause_event
@@ -405,17 +579,24 @@ class TestListenChatAgent:
         api_task_id = "error_test_123"
         agent_name = "ErrorAgent"
 
-        with patch('app.agent.listen_chat_agent.get_task_lock') as mock_get_lock, \
-             patch('camel.models.ModelFactory.create', side_effect=ValueError("Invalid model")):
+        with (
+            patch(f"{_LCA}.get_task_lock") as mock_get_lock,
+            patch(
+                "camel.models.ModelFactory.create",
+                side_effect=ValueError("Invalid model"),
+            ),
+        ):
             mock_task_lock = MagicMock()
             mock_get_lock.return_value = mock_task_lock
 
-            # Try to create agent with invalid model which should raise an error through ModelFactory
+            # Try to create agent with invalid
+            # model which should raise an error
+            # through ModelFactory
             with pytest.raises(ValueError):
                 ListenChatAgent(
                     api_task_id=api_task_id,
                     agent_name=agent_name,
-                    model="invalid_model_string"  # Invalid model type
+                    model="invalid_model_string",  # Invalid model type
                 )
 
     def test_listen_chat_agent_step_with_task_lock_error(self):
@@ -423,9 +604,13 @@ class TestListenChatAgent:
         api_task_id = "error_test_123"
         agent_name = "ErrorAgent"
 
-        with patch('app.agent.listen_chat_agent.get_task_lock', side_effect=Exception("Task lock not found")), \
-             patch('camel.models.ModelFactory.create') as mock_create_model:
-
+        with (
+            patch(
+                f"{_LCA}.get_task_lock",
+                side_effect=Exception("Task lock not found"),
+            ),
+            patch("camel.models.ModelFactory.create") as mock_create_model,
+        ):
             # Mock the model backend creation
             mock_backend = MagicMock()
             mock_backend.model_type = "gpt-4"
@@ -434,9 +619,7 @@ class TestListenChatAgent:
             mock_create_model.return_value = mock_backend
 
             agent = ListenChatAgent(
-                api_task_id=api_task_id,
-                agent_name=agent_name,
-                model="gpt-4"
+                api_task_id=api_task_id, agent_name=agent_name, model="gpt-4"
             )
 
             # Should handle task lock errors gracefully
@@ -451,7 +634,7 @@ class TestAgentWithLLM:
     @pytest.mark.asyncio
     async def test_agent_with_real_model(self, sample_chat_data):
         """Test agent creation with real LLM model."""
-        options = Chat(**sample_chat_data)
+        Chat(**sample_chat_data)
 
         # This test would use real model backends
         # Marked as model_backend test for selective execution
@@ -460,7 +643,7 @@ class TestAgentWithLLM:
     @pytest.mark.very_slow
     async def test_full_agent_conversation_workflow(self, sample_chat_data):
         """Test complete agent conversation workflow (very slow test)."""
-        options = Chat(**sample_chat_data)
+        Chat(**sample_chat_data)
 
         # This test would run complete conversation workflow
         # Marked as very_slow for execution only in full test mode

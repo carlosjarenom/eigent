@@ -36,6 +36,26 @@ interface ElectronAPI {
     fileCount?: number;
     canceled?: boolean;
   }>;
+  processDroppedFiles: (
+    fileData: Array<{ name: string; path?: string }>
+  ) => Promise<{
+    success: boolean;
+    files?: Array<{
+      filePath: string;
+      fileName: string;
+    }>;
+    error?: string;
+  }>;
+  getPathForFile: (file: File) => string;
+  savePastedFile: (
+    fileName: string,
+    data: ArrayBuffer
+  ) => Promise<{
+    success: boolean;
+    filePath?: string;
+    fileName?: string;
+    error?: string;
+  }>;
   triggerMenuAction: (action: string) => void;
   onExecuteAction: (callback: (action: string) => void) => void;
   getPlatform: () => string;
@@ -43,50 +63,120 @@ interface ElectronAPI {
   createWebView: (id: string, url: string) => Promise<any>;
   hideWebView: (id: string) => Promise<any>;
   changeViewSize: (id: string, size: any) => Promise<any>;
-  onWebviewNavigated: (callback: (id: string, url: string) => void) => () => void;
+  onWebviewNavigated: (
+    callback: (id: string, url: string) => void
+  ) => () => void;
   showWebview: (id: string) => Promise<any>;
   getActiveWebview: () => Promise<any>;
   setSize: (size: any) => Promise<any>;
   hideAllWebview: () => Promise<any>;
   getShowWebview: () => Promise<any>;
   webviewDestroy: (webviewId: string) => Promise<any>;
-  exportLog: () => Promise<any>;
+  exportLog: () => Promise<{
+    success: boolean;
+    savedPath?: string;
+    data?: string;
+    error?: string;
+  }>;
+  exportCamelLog: (
+    email: string,
+    taskId?: string,
+    projectId?: string,
+    userId?: string | number | null
+  ) => Promise<{
+    success: boolean;
+    savedPath?: string;
+    error?: string;
+  }>;
+  getDiagnosticsInfo: () => Promise<{
+    version: string;
+    platform: string;
+    arch: string;
+  }>;
+  exportDiagnosticsZip: (payload: {
+    description: string;
+    steps?: string;
+  }) => Promise<{
+    success: boolean;
+    savedPath?: string;
+    error?: string;
+  }>;
+  openMailto: (url: string) => Promise<{
+    success: boolean;
+    error?: string;
+  }>;
+  openExternal: (url: string) => Promise<{
+    success: boolean;
+    error?: string;
+  }>;
   mcpInstall: (name: string, mcp: any) => Promise<any>;
   mcpRemove: (name: string) => Promise<any>;
   mcpUpdate: (name: string, mcp: any) => Promise<any>;
   mcpList: () => Promise<any>;
-  envWrite: (email: string, kv: { key: string, value: string }) => Promise<any>;
+  envWrite: (email: string, kv: { key: string; value: string }) => Promise<any>;
   envRemove: (email: string, key: string) => Promise<any>;
   getEnvPath: (email: string) => Promise<string>;
-  executeCommand: (command: string, email: string) => Promise<{ success: boolean; stdout?: string; stderr?: string; error?: string }>;
+  executeCommand: (
+    command: string,
+    email: string
+  ) => Promise<{
+    success: boolean;
+    stdout?: string;
+    stderr?: string;
+    error?: string;
+  }>;
   readFile: (filePath: string) => Promise<any>;
   readFileAsDataUrl: (path: string) => Promise<string>;
   deleteFolder: (email: string) => Promise<any>;
   getMcpConfigPath: (email: string) => Promise<string>;
-  uploadLog: (email: string, taskId: string, baseUrl: string, token: string) => Promise<any>;
+  uploadLog: (
+    email: string,
+    taskId: string,
+    baseUrl: string,
+    token: string
+  ) => Promise<any>;
   startBrowserImport: (args?: any) => Promise<any>;
-  checkAndInstallDepsOnUpdate: () => Promise<{ success: boolean; error?: string }>;
-  checkInstallBrowser: () => Promise<{ data:any[] }>;
+  checkAndInstallDepsOnUpdate: () => Promise<{
+    success: boolean;
+    error?: string;
+  }>;
+  checkInstallBrowser: () => Promise<{ data: any[] }>;
   getInstallationStatus: () => Promise<{
     success: boolean;
     isInstalling?: boolean;
     hasLockFile?: boolean;
     installedExists?: boolean;
     timestamp?: number;
-    error?: string
+    error?: string;
   }>;
   getBackendPort: () => Promise<number | null>;
   restartBackend: () => Promise<{ success: boolean; error?: string }>;
   onInstallDependenciesStart: (callback: () => void) => void;
-  onInstallDependenciesLog: (callback: (data: { type: string; data: string }) => void) => void;
-  onInstallDependenciesComplete: (callback: (data: { success: boolean; code?: number; error?: string }) => void) => void;
-  onUpdateNotification: (callback: (data: {
-    type: string;
-    currentVersion: string;
-    previousVersion: string;
-    reason: string;
-  }) => void) => void;
-  onBackendReady: (callback: (data: { success: boolean; port?: number; error?: string }) => void) => void;
+  onInstallDependenciesLog: (
+    callback: (data: { type: string; data: string }) => void
+  ) => void;
+  onInstallDependenciesComplete: (
+    callback: (data: {
+      success: boolean;
+      code?: number;
+      error?: string;
+    }) => void
+  ) => void;
+  onUpdateNotification: (
+    callback: (data: {
+      type: string;
+      currentVersion: string;
+      previousVersion: string;
+      reason: string;
+    }) => void
+  ) => void;
+  onBackendReady: (
+    callback: (data: {
+      success: boolean;
+      port?: number;
+      error?: string;
+    }) => void
+  ) => void;
   removeAllListeners: (channel: string) => void;
   getEmailFolderPath: (email: string) => Promise<{
     MCP_REMOTE_CONFIG_DIR: string;
@@ -94,6 +184,57 @@ interface ElectronAPI {
     tempEmail: string;
   }>;
   restartApp: () => Promise<void>;
+  readGlobalEnv: (key: string) => Promise<{ value: string | null }>;
+  codexSubscriptionStatus: (email: string) => Promise<{
+    connected: boolean;
+    status:
+      | 'connected'
+      | 'connected_non_refreshable'
+      | 'expired'
+      | 'revoked'
+      | 'plan_unavailable'
+      | 'quota_exceeded'
+      | 'error'
+      | 'not_connected';
+    account_label?: string | null;
+    expires_at?: string | null;
+    last_error_code?: string | null;
+  }>;
+  codexSubscriptionLogin: (
+    email: string
+  ) => Promise<{ success: boolean; error_code?: string; error?: string }>;
+  codexSubscriptionDisconnect: (
+    email: string
+  ) => Promise<{ success: boolean; error_code?: string; error?: string }>;
+  getProjectFolderPath: (
+    email: string,
+    projectId: string,
+    userId?: string | number | null
+  ) => Promise<string>;
+  openInIDE: (
+    folderPath: string,
+    ide: string
+  ) => Promise<{ success: boolean; error?: string }>;
+  // Skills: all operations via Brain REST API
+  setBrowserPort: (port: number, isExternal?: boolean) => Promise<any>;
+  getBrowserPort: () => Promise<number>;
+  getCdpBrowsers: () => Promise<any[]>;
+  addCdpBrowser: (
+    port: number,
+    isExternal: boolean,
+    name?: string
+  ) => Promise<{ success: boolean; browser?: any; error?: string }>;
+  removeCdpBrowser: (
+    browserId: string,
+    closeBrowser?: boolean
+  ) => Promise<{ success: boolean; browser?: any; error?: string }>;
+  onCdpPoolChanged: (callback: (browsers: any[]) => void) => () => void;
+  launchCdpBrowser: () => Promise<{
+    success: boolean;
+    port?: number;
+    data?: any;
+    error?: string;
+  }>;
 }
 
 declare global {
@@ -101,4 +242,4 @@ declare global {
     ipcRenderer: IpcRenderer;
     electronAPI: ElectronAPI;
   }
-} 
+}

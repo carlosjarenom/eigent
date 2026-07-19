@@ -12,205 +12,193 @@
 // limitations under the License.
 // ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 
-import { useState, useEffect } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import { isHtmlDocument } from "@/lib/htmlFontStyles";
+import { isHtmlDocument } from '@/lib/htmlFontStyles';
+import { useEffect, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 export const MarkDown = ({
-	content,
-	speed = 15,
-	onTyping,
-	enableTypewriter = true, // Whether to enable typewriter effect
-	pTextSize = "text-xs",
-	olPadding = "",
+  content,
+  speed = 15,
+  onTyping,
+  enableTypewriter = true, // Whether to enable typewriter effect
+  pTextSize = 'text-xs',
+  olPadding = '',
 }: {
-	content: string;
-	speed?: number;
-	onTyping?: () => void;
-	enableTypewriter?: boolean;
-	pTextSize?: string;
-	olPadding?: string;
+  content: string;
+  speed?: number;
+  onTyping?: () => void;
+  enableTypewriter?: boolean;
+  pTextSize?: string;
+  olPadding?: string;
 }) => {
-	const [displayedContent, setDisplayedContent] = useState("");
+  // When the typewriter is off, seed with the full content so the very first
+  // paint already has it — otherwise the content arrives a tick later (via the
+  // effect below) and any height-animated container measures an empty body.
+  const [displayedContent, setDisplayedContent] = useState(
+    enableTypewriter ? '' : content
+  );
 
-	useEffect(() => {
-		if (!enableTypewriter) {
-			setDisplayedContent(content);
-			return;
-		}
+  useEffect(() => {
+    if (!enableTypewriter) {
+      setDisplayedContent(content);
+      return;
+    }
 
-		setDisplayedContent("");
-		let index = 0;
+    setDisplayedContent('');
+    let index = 0;
 
-		const timer = setInterval(() => {
-			if (index < content.length) {
-				setDisplayedContent(content.slice(0, index + 1));
-				index++;
-				if (onTyping) {
-					onTyping();
-				}
-			} else {
-				clearInterval(timer);
-			}
-		}, speed);
+    const timer = setInterval(() => {
+      if (index < content.length) {
+        setDisplayedContent(content.slice(0, index + 1));
+        index++;
+        if (onTyping) {
+          onTyping();
+        }
+      } else {
+        clearInterval(timer);
+      }
+    }, speed);
 
-		return () => clearInterval(timer);
-	}, [content, speed]);
+    return () => clearInterval(timer);
+  }, [content, speed, enableTypewriter, onTyping]);
 
-	// process line breaks, convert \n to <br> tag
-	const processContent = (text: string) => {
-		return text.replace(/\\n/g, "  \n "); // add two spaces before \n, so ReactMarkdown will recognize it as a line break
-	};
+  // process line breaks, convert \n to <br> tag
+  const processContent = (text: string) => {
+    return text.replace(/\\n/g, '  \n '); // add two spaces before \n, so ReactMarkdown will recognize it as a line break
+  };
 
-	// If content is a pure HTML document, render in a styled pre block
-	if (isHtmlDocument(content)) {
-		// Trim leading whitespace from each line for consistent alignment
-		const formattedHtml = displayedContent
-			.split('\n')
-			.map(line => line.trimStart())
-			.join('\n')
-			.trim();
-		return (
-			<div className="prose prose-sm w-full select-text pointer-events-auto overflow-x-auto markdown-container">
-				<pre className="bg-zinc-100 p-2 rounded text-xs font-mono overflow-x-auto whitespace-pre-wrap">
-					<code>{formattedHtml}</code>
-				</pre>
-			</div>
-		);
-	}
+  // If content is a pure HTML document, render in a styled pre block
+  if (isHtmlDocument(content)) {
+    // Trim leading whitespace from each line for consistent alignment
+    const formattedHtml = displayedContent
+      .split('\n')
+      .map((line) => line.trimStart())
+      .join('\n')
+      .trim();
+    return (
+      <div className="prose prose-sm markdown-container pointer-events-auto w-full overflow-x-auto select-text">
+        <pre className="rounded bg-code-surface p-2 font-mono text-xs overflow-x-auto whitespace-pre-wrap">
+          <code>{formattedHtml}</code>
+        </pre>
+      </div>
+    );
+  }
 
-	return (
-		<div className="prose prose-sm w-full select-text pointer-events-auto overflow-x-auto markdown-container">
-			<ReactMarkdown
-				remarkPlugins={[remarkGfm]}
-				components={{
-					h1: ({ children }) => (
-						<h1 className="text-xs font-bold text-primary mb-1 break-words">
-							{children}
-						</h1>
-					),
-					h2: ({ children }) => (
-						<h2 className="text-xs font-semibold text-primary mb-1 break-words">
-							{children}
-						</h2>
-					),
-					h3: ({ children }) => (
-						<h3 className="text-xs font-medium text-primary mb-1 break-words">
-							{children}
-						</h3>
-					),
-					p: ({ children }) => (
-						<p
-							className={`m-0 ${pTextSize} font-medium text-xs text-primary leading-10 font-inter whitespace-pre-line break-words`}
-						>
-							{children}
-						</p>
-					),
-					ul: ({ children }) => (
-						<ul
-							className={`list-disc list-inside text-xs text-primary mb-1 ${olPadding}`}
-						>
-							{children}
-						</ul>
-					),
-					// ol: ({ children }) => (
-					// 	<ol
-					// 		className={`list-decimal list-inside text-xs text-primary mb-1 ${olPadding}`}
-					// 	>
-					// 		{children}
-					// 	</ol>
-					// ),
-					li: ({ children }) => (
-						<li className="mb-1 list-inside break-all">{children}</li>
-					),
-					a: ({ children, href }) => (
-						<a
-							href={href}
-							className=" hover:text-blue-800 underline break-all"
-							target="_blank"
-							rel="noopener noreferrer"
-						>
-							{children}
-						</a>
-					),
-					code: ({ children }) => (
-						<code className="bg-zinc-100 px-1 py-0.5 rounded text-xs font-mono">
-							{children}
-						</code>
-					),
-					pre: ({ children }) => (
-						<pre className="bg-zinc-100 p-2 rounded text-xs font-mono overflow-x-auto whitespace-pre-wrap">
-							{children}
-						</pre>
-					),
-					blockquote: ({ children }) => (
-						<blockquote className="border-l-4 border-zinc-300 pl-3 italic text-primary text-xs">
-							{children}
-						</blockquote>
-					),
-					strong: ({ children }) => (
-						<strong className="font-semibold text-primary text-xs">
-							{children}
-						</strong>
-					),
-					em: ({ children }) => (
-						<em className="italic text-primary text-xs">{children}</em>
-					),
-					table: ({ children }) => (
-						<div className="overflow-x-auto w-full max-w-full">
-							<table
-								className="w-full mb-4 !table min-w-0"
-								style={{
-									borderCollapse: "collapse",
-									border: "1px solid #d1d5db",
-									borderSpacing: 0,
-								}}
-							>
-								{children}
-							</table>
-						</div>
-					),
-					thead: ({ children }) => (
-						<thead
-							className="!table-header-group"
-							style={{ backgroundColor: "#f9fafb" }}
-						>
-							{children}
-						</thead>
-					),
-					tbody: ({ children }) => (
-						<tbody className="!table-row-group">{children}</tbody>
-					),
-					tr: ({ children }) => <tr className="!table-row">{children}</tr>,
-					th: ({ children }) => (
-						<th
-							className="text-left font-semibold text-primary text-[10px] !table-cell"
-							style={{
-								border: "1px solid #d1d5db",
-								padding: "2px 5px",
-								borderCollapse: "collapse",
-							}}
-						>
-							{children}
-						</th>
-					),
-					td: ({ children }) => (
-						<td
-							className="text-primary text-[10px] !table-cell"
-							style={{
-								border: "1px solid #d1d5db",
-								padding: "2px 5px",
-								borderCollapse: "collapse",
-							}}
-						>
-							{children}
-						</td>
-					),
-				}}
-			>
-				{processContent(displayedContent)}
-			</ReactMarkdown>
-		</div>
-	);
+  return (
+    <div className="prose prose-sm markdown-container pointer-events-auto w-full overflow-x-auto select-text">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          h1: ({ children }) => (
+            <h1 className="text-ds-text-neutral-default-default mb-1 text-label-sm font-bold break-words">
+              {children}
+            </h1>
+          ),
+          h2: ({ children }) => (
+            <h2 className="text-ds-text-neutral-default-default mb-1 text-label-sm font-semibold break-words">
+              {children}
+            </h2>
+          ),
+          h3: ({ children }) => (
+            <h3 className="text-ds-text-neutral-default-default mb-1 text-label-sm font-medium break-words">
+              {children}
+            </h3>
+          ),
+          p: ({ children }) => (
+            <p
+              className={`m-0 ${pTextSize} text-ds-text-neutral-default-default font-inter text-label-xs font-medium break-words whitespace-pre-line`}
+            >
+              {children}
+            </p>
+          ),
+          ul: ({ children }) => (
+            <ul
+              className={`text-ds-text-neutral-default-default mb-1 pl-4 text-label-xs list-disc ${olPadding}`}
+            >
+              {children}
+            </ul>
+          ),
+          // ol: ({ children }) => (
+          // 	<ol
+          // 		className={`list-decimal list-inside text-xs text-primary mb-1 ${olPadding}`}
+          // 	>
+          // 		{children}
+          // 	</ol>
+          // ),
+          li: ({ children }) => (
+            <li className="mb-1 list-outside break-words">{children}</li>
+          ),
+          a: ({ children, href }) => (
+            <a
+              href={href}
+              className="text-ds-text-neutral-default-default hover:text-ds-text-neutral-muted-default break-all underline"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              {children}
+            </a>
+          ),
+          code: ({ children }) => (
+            <code className="rounded bg-code-surface px-1 py-0.5 font-mono text-xs">
+              {children}
+            </code>
+          ),
+          pre: ({ children }) => (
+            <pre className="rounded bg-code-surface p-2 font-mono text-xs overflow-x-auto whitespace-pre-wrap">
+              {children}
+            </pre>
+          ),
+          blockquote: ({ children }) => (
+            <blockquote className="text-ds-text-neutral-default-default border-ds-border-neutral-strong-default pl-3 text-xs border-l-4 italic">
+              {children}
+            </blockquote>
+          ),
+          strong: ({ children }) => (
+            <strong className="text-ds-text-neutral-default-default text-xs font-semibold">
+              {children}
+            </strong>
+          ),
+          em: ({ children }) => (
+            <em className="text-ds-text-neutral-default-default text-xs italic">
+              {children}
+            </em>
+          ),
+          table: ({ children }) => (
+            <div className="w-full max-w-full overflow-x-auto">
+              <table
+                className="mb-4 min-w-0 border-ds-border-neutral-default-default !table w-full border-collapse border"
+                style={{
+                  borderSpacing: 0,
+                }}
+              >
+                {children}
+              </table>
+            </div>
+          ),
+          thead: ({ children }) => (
+            <thead className="bg-code-surface !table-header-group">
+              {children}
+            </thead>
+          ),
+          tbody: ({ children }) => (
+            <tbody className="!table-row-group">{children}</tbody>
+          ),
+          tr: ({ children }) => <tr className="!table-row">{children}</tr>,
+          th: ({ children }) => (
+            <th className="text-ds-text-neutral-default-default border-ds-border-neutral-default-default font-semibold py-0.5 !table-cell border px-[5px] text-left text-[10px]">
+              {children}
+            </th>
+          ),
+          td: ({ children }) => (
+            <td className="text-ds-text-neutral-default-default border-ds-border-neutral-default-default py-0.5 !table-cell border px-[5px] text-[10px]">
+              {children}
+            </td>
+          ),
+        }}
+      >
+        {processContent(displayedContent)}
+      </ReactMarkdown>
+    </div>
+  );
 };

@@ -12,44 +12,66 @@
 // limitations under the License.
 // ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 
+import axios from 'axios';
 import {
   app,
   BrowserWindow,
-  shell,
+  dialog,
   ipcMain,
   Menu,
-  dialog,
   nativeTheme,
   protocol,
   session,
+  shell,
 } from 'electron';
-import { fileURLToPath } from 'node:url';
-import path from 'node:path';
-import os, { homedir } from 'node:os';
 import log from 'electron-log';
-import { update, registerUpdateIpcHandlers } from './update';
-import { checkToolInstalled, killProcessOnPort, startBackend } from './init';
-import { WebViewManager } from './webview';
-import { FileReader } from './fileReader';
-import { ChildProcessWithoutNullStreams } from 'node:child_process';
-import fs, { existsSync, readFileSync } from 'node:fs';
-import fsp from 'fs/promises';
-import { addMcp, removeMcp, updateMcp, readMcpConfig } from './utils/mcpConfig';
-import {
-  getEnvPath,
-  updateEnvBlock,
-  removeEnvKey,
-  getEmailFolderPath,
-} from './utils/envUtil';
-import { copyBrowserData } from './copy';
-import { findAvailablePort } from './init';
-import kill from 'tree-kill';
-import { zipFolder } from './utils/log';
-import mime from 'mime';
-import axios from 'axios';
 import FormData from 'form-data';
-import { checkAndInstallDepsOnUpdate, PromiseReturnType, getInstallationStatus } from './install-deps'
-import { isBinaryExists, getBackendPath, getVenvPath } from './utils/process'
+import fsp from 'fs/promises';
+import mime from 'mime';
+import { ChildProcessWithoutNullStreams, spawn } from 'node:child_process';
+import crypto from 'node:crypto';
+import fs, { existsSync } from 'node:fs';
+import http from 'node:http';
+import os, { homedir } from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import kill from 'tree-kill';
+import { copyBrowserData } from './copy';
+import { FileReader } from './fileReader';
+import {
+  checkToolInstalled,
+  findAvailablePort,
+  killProcessOnPort,
+  startBackend,
+} from './init';
+import {
+  checkAndInstallDepsOnUpdate,
+  getInstallationStatus,
+  PromiseReturnType,
+} from './install-deps';
+import { setRoundedCorners } from './native/macos-window';
+import {
+  completeCodexOAuthCallback,
+  getCodexResolverEnv,
+  registerCodexSubscriptionAuthIpcHandlers,
+} from './subscriptionAuth';
+import { registerUpdateIpcHandlers, update } from './update';
+import {
+  getEmailFolderPath,
+  getEnvPath,
+  maskProxyUrl,
+  readGlobalEnvKey,
+  removeEnvKey,
+  updateEnvBlock,
+} from './utils/envUtil';
+import { createDiagnosticsZip, zipDirectories, zipFolder } from './utils/log';
+import { addMcp, readMcpConfig, removeMcp, updateMcp } from './utils/mcpConfig';
+import {
+  checkVenvExistsForPreCheck,
+  getBackendPath,
+  isBinaryExists,
+} from './utils/process';
+import { WebViewManager } from './webview';
 
 const userData = app.getPath('userData');
 
@@ -64,11 +86,336 @@ const VITE_PUBLIC = VITE_DEV_SERVER_URL
 
 // ==================== global variables ====================
 let win: BrowserWindow | null = null;
+let createWindowPromise: Promise<void> | null = null;
 let webViewManager: WebViewManager | null = null;
 let fileReader: FileReader | null = null;
 let python_process: ChildProcessWithoutNullStreams | null = null;
 let backendPort: number = 5001;
+let backendStartPromise: Promise<BackendStartResult> | null = null;
 let browser_port = 9222;
+let use_external_cdp = false;
+let proxyUrl: string | null = null;
+
+const PREVIEW_WEBVIEW_PARTITION = 'persist:session-preview';
+
+const isHttpOrHttpsUrl = (url: unknown): url is string => {
+  if (typeof url !== 'string') return false;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+};
+
+// CDP Browser Pool
+interface CdpBrowser {
+  id: string;
+  port: number;
+  isExternal: boolean;
+  name?: string;
+  addedAt: number;
+}
+let cdp_browser_pool: CdpBrowser[] = [];
+let cdpLastAssignedPort = 9223; // tracks the highest port ever assigned, never decreases
+let cdpHealthCheckTimer: ReturnType<typeof setInterval> | null = null;
+
+const CDP_POOL_FILE = path.join(os.homedir(), '.eigent', 'cdp-browsers.json');
+
+type BackendStartOptions = {
+  forceRestart?: boolean;
+};
+
+type BackendStartResult =
+  | { success: true; port: number }
+  | { success: false; error: string };
+
+function formatErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isBrokenConsolePipeError(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    ((error as NodeJS.ErrnoException).code === 'EPIPE' ||
+      (error as NodeJS.ErrnoException).code === 'ERR_STREAM_DESTROYED')
+  );
+}
+
+function disableConsoleLogTransport(): void {
+  if (log.transports.console.level !== false) {
+    log.transports.console.level = false;
+  }
+}
+
+function handleProcessPipeError(error: Error): void {
+  if (isBrokenConsolePipeError(error)) {
+    disableConsoleLogTransport();
+    return;
+  }
+
+  setImmediate(() => {
+    throw error;
+  });
+}
+
+process.stdout.on('error', handleProcessPipeError);
+process.stderr.on('error', handleProcessPipeError);
+
+function isPythonProcessRunning(): boolean {
+  return Boolean(
+    python_process &&
+    !python_process.killed &&
+    python_process.exitCode === null &&
+    python_process.signalCode === null
+  );
+}
+
+function notifyBackendReady(result: BackendStartResult): void {
+  if (!win || win.isDestroyed()) {
+    return;
+  }
+
+  win.webContents.send(
+    'backend-ready',
+    result.success
+      ? {
+          success: true,
+          port: result.port,
+        }
+      : {
+          success: false,
+          error: result.error,
+        }
+  );
+}
+
+function checkBackendHealth(port: number): Promise<boolean> {
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    return Promise.resolve(false);
+  }
+
+  return new Promise((resolve) => {
+    const req = http.get(
+      `http://127.0.0.1:${port}/health`,
+      { timeout: 1000 },
+      (res) => {
+        res.resume();
+        resolve(res.statusCode === 200);
+      }
+    );
+
+    req.on('error', () => resolve(false));
+    req.on('timeout', () => {
+      req.destroy();
+      resolve(false);
+    });
+  });
+}
+
+/** Persist pool to disk. */
+function saveCdpPool(): void {
+  try {
+    fs.writeFileSync(CDP_POOL_FILE, JSON.stringify(cdp_browser_pool, null, 2));
+  } catch (e) {
+    log.error(`[CDP POOL] Failed to save pool: ${e}`);
+  }
+}
+
+/** Load pool from disk. Mark all as external (process handles are lost after restart). */
+function loadCdpPool(): void {
+  try {
+    if (fs.existsSync(CDP_POOL_FILE)) {
+      const data = JSON.parse(fs.readFileSync(CDP_POOL_FILE, 'utf-8'));
+      cdp_browser_pool = (data as CdpBrowser[]).map((b) => ({
+        ...b,
+        isExternal: true,
+      }));
+      cdpLastAssignedPort = cdp_browser_pool.reduce(
+        (max, b) => Math.max(max, b.port),
+        cdpLastAssignedPort
+      );
+      log.info(
+        `[CDP POOL] Loaded ${cdp_browser_pool.length} browser(s) from disk, lastAssignedPort=${cdpLastAssignedPort}`
+      );
+    }
+  } catch (e) {
+    log.error(`[CDP POOL] Failed to load pool: ${e}`);
+    cdp_browser_pool = [];
+  }
+}
+
+/** Push current pool to frontend. */
+function notifyCdpPoolChanged(): void {
+  if (win && !win.isDestroyed()) {
+    log.info(
+      `[CDP POOL] Pushing pool update to frontend (size=${cdp_browser_pool.length})`
+    );
+    win.webContents.send('cdp-pool-changed', cdp_browser_pool);
+  } else {
+    log.warn('[CDP POOL] Cannot notify: win is null or destroyed');
+  }
+}
+
+/** Probe a CDP port. Returns true if alive. */
+async function isCdpPortAlive(port: number): Promise<boolean> {
+  try {
+    const resp = await axios.get(`http://localhost:${port}/json/version`, {
+      timeout: 1500,
+    });
+    return resp.status === 200;
+  } catch {
+    return false;
+  }
+}
+
+/** Run one health-check cycle: remove dead browsers, persist & notify if changed. */
+async function runPoolHealthCheck(): Promise<void> {
+  if (cdp_browser_pool.length === 0) return;
+  // Probe a snapshot so add/remove IPC handlers can run safely in parallel.
+  const snapshot = [...cdp_browser_pool];
+  const results = await Promise.all(
+    snapshot.map((b) => isCdpPortAlive(b.port))
+  );
+  const deadIds = snapshot
+    .filter((_, idx) => !results[idx])
+    .map((browser) => browser.id);
+  if (deadIds.length === 0) return;
+
+  const deadIdSet = new Set(deadIds);
+  const removedBrowsers = cdp_browser_pool.filter((b) => deadIdSet.has(b.id));
+  if (removedBrowsers.length === 0) return;
+
+  cdp_browser_pool = cdp_browser_pool.filter((b) => !deadIdSet.has(b.id));
+  const deadPorts = removedBrowsers.map((b) => b.port);
+  if (deadPorts.length > 0) {
+    log.info(
+      `[CDP POOL] Health-check removed dead ports: ${deadPorts.join(', ')}. pool_size=${cdp_browser_pool.length}`
+    );
+    saveCdpPool();
+    notifyCdpPoolChanged();
+  }
+}
+
+/** Start periodic health check (call after window is created). */
+function startCdpHealthCheck(): void {
+  if (cdpHealthCheckTimer) {
+    clearInterval(cdpHealthCheckTimer);
+    cdpHealthCheckTimer = null;
+  }
+  log.info('[CDP POOL] Starting health check (interval=3s)');
+  // Run once immediately
+  runPoolHealthCheck();
+  cdpHealthCheckTimer = setInterval(runPoolHealthCheck, 3000);
+}
+
+function stopCdpHealthCheck(): void {
+  if (cdpHealthCheckTimer) {
+    clearInterval(cdpHealthCheckTimer);
+    cdpHealthCheckTimer = null;
+  }
+}
+
+/** Close a browser via CDP Browser.close() WebSocket command. Best-effort.
+ *  Uses raw Node.js http upgrade (no external ws dependency needed).
+ *  IMPORTANT: Never close the Electron app's own CDP port. */
+async function closeBrowserViaCdp(port: number): Promise<void> {
+  // Guard: refuse to close the Electron app's own CDP port
+  if (port === browser_port) {
+    log.warn(
+      `[CDP CLOSE] Refusing to close port ${port} (Electron app's own CDP port)`
+    );
+    return;
+  }
+
+  try {
+    const resp = await axios.get(`http://localhost:${port}/json/version`, {
+      timeout: 2000,
+    });
+    const wsUrl: string | undefined = resp.data?.webSocketDebuggerUrl;
+    if (!wsUrl) {
+      log.warn(`[CDP CLOSE] No webSocketDebuggerUrl for port ${port}`);
+      return;
+    }
+
+    const url = new URL(wsUrl);
+    const key = crypto.randomBytes(16).toString('base64');
+
+    await new Promise<void>((resolve) => {
+      let resolved = false;
+      const done = () => {
+        if (!resolved) {
+          resolved = true;
+          resolve();
+        }
+      };
+
+      const req = http.request(
+        {
+          hostname: url.hostname,
+          port: url.port,
+          path: url.pathname,
+          method: 'GET',
+          headers: {
+            Connection: 'Upgrade',
+            Upgrade: 'websocket',
+            'Sec-WebSocket-Version': '13',
+            'Sec-WebSocket-Key': key,
+          },
+        },
+        () => done()
+      );
+
+      const timer = setTimeout(() => {
+        req.destroy();
+        done();
+      }, 3000);
+
+      req.on('upgrade', (_res, socket) => {
+        // Handle socket errors to prevent uncaught exceptions
+        socket.on('error', () => {});
+
+        // Build a masked WebSocket text frame with Browser.close
+        const payload = Buffer.from(
+          JSON.stringify({ id: 1, method: 'Browser.close' })
+        );
+        const mask = crypto.randomBytes(4);
+        const header = Buffer.alloc(6);
+        header[0] = 0x81; // FIN + text opcode
+        header[1] = 0x80 | payload.length; // MASK bit + length (<126)
+        mask.copy(header, 2);
+
+        const masked = Buffer.alloc(payload.length);
+        for (let i = 0; i < payload.length; i++) {
+          masked[i] = payload[i] ^ mask[i & 3];
+        }
+
+        socket.write(Buffer.concat([header, masked]));
+        log.info(`[CDP CLOSE] Sent Browser.close to port ${port}`);
+
+        // Give Chrome a moment to process, then clean up
+        setTimeout(() => {
+          clearTimeout(timer);
+          socket.destroy();
+          done();
+        }, 500);
+      });
+
+      req.on('error', (err) => {
+        log.warn(`[CDP CLOSE] Request error for port ${port}: ${err.message}`);
+        clearTimeout(timer);
+        done();
+      });
+
+      req.end();
+    });
+    log.info(`[CDP CLOSE] Successfully closed browser on port ${port}`);
+  } catch (err) {
+    log.warn(`[CDP CLOSE] Best-effort close failed for port ${port}: ${err}`);
+  }
+}
 
 // Protocol URL queue for handling URLs before window is ready
 let protocolUrlQueue: string[] = [];
@@ -122,12 +469,22 @@ app.commandLine.appendSwitch('max_old_space_size', '4096');
 app.commandLine.appendSwitch('enable-features', 'MemoryPressureReduction');
 app.commandLine.appendSwitch('renderer-process-limit', '8');
 
+// Disable Fontations (Rust-based font engine) to prevent crashes on macOS
+app.commandLine.appendSwitch('disable-features', 'Fontations');
+
+// ==================== Proxy configuration ====================
+// Read proxy from global .env file on startup
+proxyUrl = readGlobalEnvKey('HTTP_PROXY');
+if (proxyUrl) {
+  log.info(`[PROXY] Applying proxy configuration: ${maskProxyUrl(proxyUrl)}`);
+  app.commandLine.appendSwitch('proxy-server', proxyUrl);
+} else {
+  log.info('[PROXY] No proxy configured');
+}
+
 // ==================== Anti-fingerprint settings ====================
 // Disable automation controlled indicator to avoid detection
-app.commandLine.appendSwitch(
-  'disable-blink-features',
-  'AutomationControlled'
-);
+app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');
 
 // Override User Agent to remove Electron/eigent identifiers
 // Dynamically generate User Agent based on actual platform and Chrome version
@@ -167,8 +524,8 @@ protocol.registerSchemesAsPrivileged([
 process.env.APP_ROOT = MAIN_DIST;
 process.env.VITE_PUBLIC = VITE_PUBLIC;
 
-// Disable system theme
-nativeTheme.themeSource = 'light';
+// Always follow OS appearance so renderer `prefers-color-scheme` stays accurate.
+nativeTheme.themeSource = 'system';
 
 // Set log level
 log.transports.console.level = 'info';
@@ -205,27 +562,33 @@ const setupProtocolHandlers = () => {
 
 // ==================== protocol url handle ====================
 function handleProtocolUrl(url: string) {
-  log.info('enter handleProtocolUrl', url);
+  log.info('enter handleProtocolUrl');
 
   // If window is not ready, queue the URL
   if (!isWindowReady || !win || win.isDestroyed()) {
-    log.info('Window not ready, queuing protocol URL:', url);
+    log.info('Window not ready, queuing protocol URL');
     protocolUrlQueue.push(url);
     return;
   }
 
-  processProtocolUrl(url);
+  void processProtocolUrl(url);
 }
 
 // Process a single protocol URL
-function processProtocolUrl(url: string) {
+async function processProtocolUrl(url: string) {
   const urlObj = new URL(url);
   const code = urlObj.searchParams.get('code');
+  const token = urlObj.searchParams.get('token');
   const share_token = urlObj.searchParams.get('share_token');
 
-  log.info('urlObj', urlObj);
-  log.info('code', code);
-  log.info('share_token', share_token);
+  log.info('urlObj', {
+    protocol: urlObj.protocol,
+    host: urlObj.host,
+    pathname: urlObj.pathname,
+  });
+  log.info('code present', Boolean(code));
+  log.info('token present', Boolean(token));
+  log.info('share_token present', Boolean(share_token));
 
   if (win && !win.isDestroyed()) {
     log.info('urlObj.pathname', urlObj.pathname);
@@ -234,13 +597,29 @@ function processProtocolUrl(url: string) {
       log.info('oauth');
       const provider = urlObj.searchParams.get('provider');
       const code = urlObj.searchParams.get('code');
-      log.info('protocol oauth', provider, code);
+      const codexResult = await completeCodexOAuthCallback(urlObj);
+      if (codexResult.handled) {
+        win.webContents.send(
+          'subscription-auth:codex-status-changed',
+          codexResult.error_code
+            ? { error_code: codexResult.error_code }
+            : undefined
+        );
+        return;
+      }
+      log.info('protocol oauth', provider, Boolean(code));
       win.webContents.send('oauth-authorized', { provider, code });
       return;
     }
 
+    if (token) {
+      log.info('protocol token received');
+      win.webContents.send('auth-token-received', token);
+      return;
+    }
+
     if (code) {
-      log.error('protocol code:', code);
+      log.info('protocol code received');
       win.webContents.send('auth-code-received', code);
     }
 
@@ -269,31 +648,81 @@ function processQueuedProtocolUrls() {
     protocolUrlQueue = [];
 
     urls.forEach((url) => {
-      processProtocolUrl(url);
+      void processProtocolUrl(url);
     });
   }
 }
 
+// ==================== auth callback server ====================
+// Local HTTP server for receiving auth callbacks from external login (eigent.ai)
+// Works in both dev and production mode, avoids eigent:// protocol issues in dev
+let authCallbackServer: http.Server | null = null;
+let authCallbackPort: number | null = null;
+
+async function startAuthCallbackServer() {
+  if (authCallbackServer) return authCallbackPort;
+
+  const port = await findAvailablePort(19836, 19900);
+
+  authCallbackServer = http.createServer((req, res) => {
+    const url = new URL(req.url || '', `http://localhost:${port}`);
+
+    if (url.pathname === '/auth/callback') {
+      const token = url.searchParams.get('token');
+      log.info('Auth callback URL:', req.url);
+      log.info('Auth callback token present:', !!token);
+      log.info('Auth callback win available:', !!win && !win.isDestroyed());
+
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(`
+        <!DOCTYPE html>
+        <html><head><title>Login Successful</title>
+        <style>
+          body { font-family: -apple-system, system-ui, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #f4f4f9; color: #333; }
+          .container { padding: 40px; background: white; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); text-align: center; }
+        </style></head>
+        <body><div class="container">
+          <h1>Login Successful</h1>
+          <p>You can close this tab and return to Eigent.</p>
+        </div></body></html>
+      `);
+
+      if (token && win && !win.isDestroyed()) {
+        log.info('Auth callback received token');
+        win.webContents.send('auth-token-received', token);
+        win.show();
+        win.focus();
+      }
+    } else {
+      res.writeHead(404);
+      res.end('Not Found');
+    }
+  });
+
+  authCallbackServer.listen(port);
+  authCallbackPort = port;
+  log.info(`Auth callback server started on port ${port}`);
+  return port;
+}
+
 // ==================== single instance lock ====================
 const setupSingleInstanceLock = () => {
-  const gotLock = app.requestSingleInstanceLock();
-  if (!gotLock) {
-    log.info('no-lock');
-    app.quit();
-  } else {
-    app.on('second-instance', (event, argv) => {
-      log.info('second-instance', argv);
-      const url = argv.find((arg) => arg.startsWith('eigent://'));
-      if (url) handleProtocolUrl(url);
-      if (win) win.show();
-    });
+  // The lock is already acquired at module level (requestSingleInstanceLock
+  // above). Calling it again here would release and re-acquire the lock,
+  // creating a window where a second instance could start. We only need
+  // to register the event handlers.
+  app.on('second-instance', (event, argv) => {
+    log.info('second-instance', argv);
+    const url = argv.find((arg) => arg.startsWith('eigent://'));
+    if (url) handleProtocolUrl(url);
+    if (win) win.show();
+  });
 
-    app.on('open-url', (event, url) => {
-      log.info('open-url');
-      event.preventDefault();
-      handleProtocolUrl(url);
-    });
-  }
+  app.on('open-url', (event, url) => {
+    log.info('open-url');
+    event.preventDefault();
+    handleProtocolUrl(url);
+  });
 };
 
 // ==================== initialize config ====================
@@ -355,11 +784,277 @@ const checkManagerInstance = (manager: any, name: string) => {
 };
 
 function registerIpcHandlers() {
+  registerCodexSubscriptionAuthIpcHandlers(ipcMain);
+
+  // ==================== auth callback ====================
+  ipcMain.handle('get-auth-callback-url', async () => {
+    const port = await startAuthCallbackServer();
+    return `http://localhost:${port}/auth/callback`;
+  });
+
   // ==================== basic info handler ====================
   ipcMain.handle('get-browser-port', () => {
     log.info('Getting browser port');
     return browser_port;
   });
+
+  // Set browser port
+  ipcMain.handle(
+    'set-browser-port',
+    (event, port: number, isExternal: boolean = false) => {
+      log.info(`Setting browser port to ${port}, external: ${isExternal}`);
+      browser_port = port;
+      use_external_cdp = isExternal;
+      return { success: true, port: browser_port, use_external_cdp };
+    }
+  );
+
+  // Get external CDP flag
+  ipcMain.handle('get-use-external-cdp', () => {
+    log.info(`Getting use_external_cdp: ${use_external_cdp}`);
+    return use_external_cdp;
+  });
+
+  // ==================== CDP Browser Pool Management ====================
+
+  // Get all browsers in the pool
+  ipcMain.handle('get-cdp-browsers', () => {
+    log.debug(`[CDP POOL] GET pool (size=${cdp_browser_pool.length})`);
+    return cdp_browser_pool;
+  });
+
+  // Add browser to pool
+  ipcMain.handle(
+    'add-cdp-browser',
+    (event, port: number, isExternal: boolean, name?: string) => {
+      const existing = cdp_browser_pool.find((b) => b.port === port);
+      if (existing) {
+        log.warn(
+          `[CDP POOL] ADD rejected: port ${port} already exists (id=${existing.id})`
+        );
+        return {
+          success: false,
+          error: 'Browser with this port already exists',
+        };
+      }
+
+      const newBrowser: CdpBrowser = {
+        id: `cdp-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+        port,
+        isExternal,
+        name,
+        addedAt: Date.now(),
+      };
+
+      cdp_browser_pool.push(newBrowser);
+      saveCdpPool();
+      notifyCdpPoolChanged();
+      log.info(
+        `[CDP POOL] ADD: port=${port}, isExternal=${isExternal}, id=${newBrowser.id}, pool_size=${cdp_browser_pool.length}`
+      );
+
+      return { success: true, browser: newBrowser };
+    }
+  );
+
+  // Remove browser from pool (also closes the browser via CDP)
+  ipcMain.handle(
+    'remove-cdp-browser',
+    async (event, browserId: string, closeBrowser: boolean = true) => {
+      const index = cdp_browser_pool.findIndex((b) => b.id === browserId);
+      if (index === -1) {
+        log.warn(`[CDP POOL] REMOVE: browser not found: ${browserId}`);
+        return { success: false, error: 'Browser not found' };
+      }
+
+      const removed = cdp_browser_pool.splice(index, 1)[0];
+
+      // Close the browser via CDP (best-effort)
+      if (closeBrowser) {
+        await closeBrowserViaCdp(removed.port);
+      }
+
+      saveCdpPool();
+      notifyCdpPoolChanged();
+      log.info(
+        `[CDP POOL] REMOVE: port=${removed.port}, id=${removed.id}, closed=${closeBrowser}, pool_size=${cdp_browser_pool.length}`
+      );
+      return { success: true, browser: removed };
+    }
+  );
+
+  // Launch CDP browser with automatic port assignment
+  ipcMain.handle('launch-cdp-browser', async () => {
+    try {
+      // 1. Always increment port from the last assigned port
+      // Port 9223 is reserved for the login browser
+      let port: number | null = null;
+      for (let p = cdpLastAssignedPort + 1; p < 9300; p++) {
+        if (!(await isCdpPortAlive(p))) {
+          port = p;
+          break;
+        }
+      }
+      // Wrap around if we hit the ceiling
+      if (port === null) {
+        for (let p = 9224; p <= cdpLastAssignedPort && p < 9300; p++) {
+          if (
+            !cdp_browser_pool.some((b) => b.port === p) &&
+            !(await isCdpPortAlive(p))
+          ) {
+            port = p;
+            break;
+          }
+        }
+      }
+      if (port === null) {
+        return { success: false, error: 'No available port in 9224-9299' };
+      }
+
+      // 2. Find Playwright Chromium executable
+      const platform = process.platform;
+      let cacheDir: string;
+      if (platform === 'darwin')
+        cacheDir = path.join(homedir(), 'Library/Caches/ms-playwright');
+      else if (platform === 'linux')
+        cacheDir = path.join(homedir(), '.cache/ms-playwright');
+      else if (platform === 'win32')
+        cacheDir = path.join(homedir(), 'AppData/Local/ms-playwright');
+      else
+        return { success: false, error: `Unsupported platform: ${platform}` };
+
+      if (!existsSync(cacheDir)) {
+        return {
+          success: false,
+          error:
+            'Playwright Chromium not found. Please run: npx playwright install chromium',
+        };
+      }
+
+      const chromiumDirs = fs
+        .readdirSync(cacheDir)
+        .filter((d) => d.startsWith('chromium-'))
+        .sort()
+        .reverse();
+      if (chromiumDirs.length === 0) {
+        return {
+          success: false,
+          error:
+            'No Playwright Chromium found. Run: npx playwright install chromium',
+        };
+      }
+
+      const platformPaths: Record<string, (base: string) => string[]> = {
+        darwin: (base) => [
+          path.join(
+            base,
+            'chrome-mac-arm64/Chromium.app/Contents/MacOS/Chromium'
+          ),
+          path.join(
+            base,
+            'chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing'
+          ),
+          path.join(base, 'chrome-mac/Chromium.app/Contents/MacOS/Chromium'),
+          path.join(
+            base,
+            'chrome-mac/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing'
+          ),
+        ],
+        linux: (base) => [path.join(base, 'chrome-linux/chrome')],
+        win32: (base) => [
+          path.join(base, 'chrome-win64/chrome.exe'),
+          path.join(base, 'chrome-win/chrome.exe'),
+        ],
+      };
+
+      let chromeExe: string | null = null;
+      for (const dir of chromiumDirs) {
+        const base = path.join(cacheDir, dir);
+        const candidates = platformPaths[platform](base);
+        const found = candidates.find((p) => existsSync(p));
+        if (found) {
+          chromeExe = found;
+          break;
+        }
+      }
+      if (!chromeExe) {
+        return { success: false, error: 'Chromium executable not found' };
+      }
+
+      // 3. Launch browser
+      const userDataDir = path.join(
+        app.getPath('userData'),
+        `cdp_browser_profile_${port}`
+      );
+      if (!existsSync(userDataDir)) {
+        await fsp.mkdir(userDataDir, { recursive: true });
+      }
+
+      const proc = spawn(
+        chromeExe,
+        [
+          `--remote-debugging-port=${port}`,
+          `--user-data-dir=${userDataDir}`,
+          '--no-first-run',
+          '--no-default-browser-check',
+          '--disable-blink-features=AutomationControlled',
+          'about:blank',
+        ],
+        { detached: false, stdio: 'ignore' }
+      );
+
+      proc.on('error', (err) =>
+        log.error(`[CDP LAUNCH] Process error port=${port}: ${err}`)
+      );
+
+      // 4. Poll for readiness (max 5s)
+      let data: any = null;
+      const start = Date.now();
+      while (Date.now() - start < 5000) {
+        try {
+          const resp = await axios.get(
+            `http://localhost:${port}/json/version`,
+            { timeout: 1000 }
+          );
+          if (resp.status === 200) {
+            data = resp.data;
+            break;
+          }
+        } catch {}
+        await new Promise((r) => setTimeout(r, 300));
+      }
+
+      if (!data) {
+        proc.kill();
+        return {
+          success: false,
+          error: `Browser not responding on port ${port} after 5s`,
+        };
+      }
+
+      // 5. Add to pool automatically
+      const newBrowser: CdpBrowser = {
+        id: `cdp-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+        port,
+        isExternal: false,
+        name: `Launched Browser (${port})`,
+        addedAt: Date.now(),
+      };
+      cdp_browser_pool.push(newBrowser);
+      cdpLastAssignedPort = port;
+      saveCdpPool();
+      notifyCdpPoolChanged();
+
+      log.info(
+        `[CDP LAUNCH] Success: port=${port}, id=${newBrowser.id}, pool_size=${cdp_browser_pool.length}`
+      );
+      return { success: true, port, data };
+    } catch (err: any) {
+      log.error(`[CDP LAUNCH] Failed: ${err}`);
+      return { success: false, error: err.message };
+    }
+  });
+
   ipcMain.handle('get-app-version', () => app.getVersion());
   ipcMain.handle('get-backend-port', () => backendPort);
 
@@ -379,20 +1074,14 @@ function registerIpcHandlers() {
 
   ipcMain.handle('restart-backend', async () => {
     try {
-      if (backendPort) {
-        log.info('Restarting backend service...');
-        await cleanupPythonProcess();
-        await checkAndStartBackend();
+      const result = await restartBackendService();
+      if (result.success) {
         log.info('Backend restart completed successfully');
-        return { success: true };
-      } else {
-        log.warn('No backend port found, starting fresh backend');
-        await checkAndStartBackend();
-        return { success: true };
       }
+      return result;
     } catch (error) {
       log.error('Failed to restart backend:', error);
-      return { success: false, error: String(error) };
+      return { success: false, error: formatErrorMessage(error) };
     }
   });
   ipcMain.handle('get-system-language', getSystemLanguage);
@@ -415,9 +1104,7 @@ function registerIpcHandlers() {
       try {
         const { spawn } = await import('child_process');
 
-        // Add --host parameter
-        const commandWithHost = `${command} --debug --host dev.eigent.ai/api/oauth/notion/callback?code=1`;
-        // const commandWithHost = `${command}`;
+        const commandWithHost = command;
 
         log.info(' start execute command:', commandWithHost);
 
@@ -546,6 +1233,161 @@ function registerIpcHandlers() {
     }
   });
 
+  // Camel (backend) logs live per task at
+  // ~/.eigent/<identity>/[project_<id>/]task_<taskId>/camel_logs.
+  // Targets the task the user last ran when provided; otherwise exports all.
+  ipcMain.handle(
+    'export-camel-log',
+    async (
+      _event,
+      email: string,
+      taskId?: string,
+      projectId?: string,
+      userId?: string | number | null
+    ) => {
+      try {
+        if (typeof email !== 'string' || !email) {
+          return { success: false, error: 'Missing email' };
+        }
+
+        const manager = checkManagerInstance(fileReader, 'FileReader');
+        const camelLogEntries = manager.getCamelLogEntries(
+          email,
+          taskId,
+          projectId,
+          userId
+        );
+        if (camelLogEntries.length === 0) {
+          return { success: false, error: 'no log file' };
+        }
+
+        const appVersion = app.getVersion();
+        const defaultFileName = `eigent-camel-logs-${appVersion}-${Date.now()}.zip`;
+        const { canceled, filePath } = await dialog.showSaveDialog({
+          title: 'Save Camel logs',
+          defaultPath: defaultFileName,
+          filters: [{ name: 'ZIP archive', extensions: ['zip'] }],
+        });
+
+        if (canceled || !filePath) {
+          return { success: false, error: '' };
+        }
+
+        await zipDirectories(filePath, camelLogEntries);
+        return { success: true, savedPath: filePath };
+      } catch (error: any) {
+        log.error('export-camel-log failed:', error);
+        return { success: false, error: error.message };
+      }
+    }
+  );
+
+  ipcMain.handle('get-diagnostics-info', async () => {
+    return {
+      version: app.getVersion(),
+      platform: process.platform,
+      arch: process.arch,
+    };
+  });
+
+  ipcMain.handle(
+    'export-diagnostics-zip',
+    async (
+      _event,
+      payload: { description: string; steps?: string } | undefined
+    ) => {
+      try {
+        const description =
+          typeof payload?.description === 'string'
+            ? payload.description.trim()
+            : '';
+        if (!description) {
+          return { success: false, error: 'Description is required' };
+        }
+        const steps =
+          typeof payload?.steps === 'string' ? payload.steps.trim() : '';
+
+        const logFiles: { src: string; destName: string }[] = [];
+        if (fs.existsSync(logPath)) {
+          logFiles.push({ src: logPath, destName: 'electron-main.log' });
+        }
+        const backupResolved = getBackupLogPath();
+        if (
+          fs.existsSync(backupResolved) &&
+          path.resolve(backupResolved) !== path.resolve(logPath)
+        ) {
+          logFiles.push({
+            src: backupResolved,
+            destName: 'electron-userdata-logs.log',
+          });
+        }
+        if (logFiles.length === 0) {
+          return { success: false, error: 'no log file' };
+        }
+
+        const appVersion = app.getVersion();
+        const platform = process.platform;
+        const arch = process.arch;
+        const bugReportText = [
+          'Eigent bug report',
+          '=================',
+          '',
+          `App version: ${appVersion}`,
+          `OS: ${platform} (${arch})`,
+          '',
+          'Description',
+          '-----------',
+          description,
+          '',
+          ...(steps
+            ? ['Steps to reproduce', '-------------------', steps, '']
+            : []),
+        ].join('\n');
+
+        const defaultFileName = `eigent-diagnostics-${appVersion}-${Date.now()}.zip`;
+        const { canceled, filePath } = await dialog.showSaveDialog({
+          title: 'Save diagnostics',
+          defaultPath: defaultFileName,
+          filters: [{ name: 'ZIP archive', extensions: ['zip'] }],
+        });
+
+        if (canceled || !filePath) {
+          return { success: false, error: '' };
+        }
+
+        await createDiagnosticsZip(filePath, bugReportText, logFiles);
+        return { success: true, savedPath: filePath };
+      } catch (error: any) {
+        log.error('export-diagnostics-zip failed:', error);
+        return { success: false, error: error.message };
+      }
+    }
+  );
+
+  ipcMain.handle('open-mailto', async (_event, url: string) => {
+    try {
+      if (typeof url !== 'string' || !url.startsWith('mailto:')) {
+        return { success: false, error: 'Invalid mailto URL' };
+      }
+      await shell.openExternal(url);
+      return { success: true };
+    } catch (error: any) {
+      return { success: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('open-external', async (_event, url: string) => {
+    try {
+      if (!isHttpOrHttpsUrl(url)) {
+        return { success: false, error: 'Invalid external URL' };
+      }
+      await shell.openExternal(url);
+      return { success: true };
+    } catch (error: any) {
+      return { success: false, error: error.message };
+    }
+  });
+
   ipcMain.handle(
     'upload-log',
     async (
@@ -631,7 +1473,7 @@ function registerIpcHandlers() {
     if (mcp.args && typeof mcp.args === 'string') {
       try {
         mcp.args = JSON.parse(mcp.args);
-      } catch (e) {
+      } catch (_error) {
         // If parsing fails, split by comma as fallback
         mcp.args = mcp.args
           .split(',')
@@ -653,7 +1495,7 @@ function registerIpcHandlers() {
     if (mcp.args && typeof mcp.args === 'string') {
       try {
         mcp.args = JSON.parse(mcp.args);
-      } catch (e) {
+      } catch (_error) {
         // If parsing fails, split by comma as fallback
         mcp.args = mcp.args
           .split(',')
@@ -784,6 +1626,66 @@ function registerIpcHandlers() {
     };
   });
 
+  // Handle drag-and-drop files - convert File objects to file paths
+  ipcMain.handle(
+    'process-dropped-files',
+    async (event, fileData: Array<{ name: string; path?: string }>) => {
+      try {
+        // In Electron with contextIsolation, we need to get file paths differently
+        // The renderer will send us file metadata, and we'll use webUtils if needed
+        const files = fileData
+          .filter((f) => f.path) // Only process files with valid paths
+          .map((f) => ({
+            filePath: fs.realpathSync(f.path!),
+            fileName: f.name,
+          }));
+
+        if (files.length === 0) {
+          return {
+            success: false,
+            error: 'No valid file paths found',
+          };
+        }
+
+        return {
+          success: true,
+          files,
+        };
+      } catch (error: any) {
+        log.error('Failed to process dropped files:', error);
+        return {
+          success: false,
+          error: error.message,
+        };
+      }
+    }
+  );
+
+  // Persist a pasted file (e.g. a clipboard image) so it can join the
+  // path-based attachment flow; pasted File objects carry no filesystem path.
+  ipcMain.handle(
+    'save-pasted-file',
+    async (_event, fileName: string, data: ArrayBuffer) => {
+      try {
+        const pastedDir = path.join(app.getPath('temp'), 'eigent-pasted');
+        await fsp.mkdir(pastedDir, { recursive: true });
+        const stamp = new Date()
+          .toISOString()
+          .replace(/[-:]/g, '')
+          .replace(/\..+/, '')
+          .replace('T', '-');
+        const safeName = (fileName || 'pasted-file').replace(/[^\w.-]+/g, '_');
+        const unique = crypto.randomUUID();
+        const filePath = path.join(pastedDir, `${stamp}-${unique}-${safeName}`);
+        await fsp.writeFile(filePath, Buffer.from(new Uint8Array(data)));
+        return { success: true, filePath, fileName: safeName };
+      } catch (error: any) {
+        log.error('Failed to save pasted file:', error);
+        return { success: false, error: error.message };
+      }
+    }
+  );
+
   ipcMain.handle('reveal-in-folder', async (event, filePath: string) => {
     try {
       const stats = await fs.promises
@@ -799,8 +1701,10 @@ function registerIpcHandlers() {
     }
   });
 
+  // Skills: all operations via Brain REST API (backend). No IPC.
+
   // ==================== read file handler ====================
-  ipcMain.handle('read-file', async (event, filePath: string) => {
+  ipcMain.handle('read-file', async (_event, filePath: string) => {
     try {
       log.info('Reading file:', filePath);
 
@@ -809,17 +1713,13 @@ function registerIpcHandlers() {
         log.error('File does not exist:', filePath);
         return { success: false, error: 'File does not exist' };
       }
-
-      // Check if it's a directory
       const stats = await fsp.stat(filePath);
       if (stats.isDirectory()) {
         log.error('Path is a directory, not a file:', filePath);
         return { success: false, error: 'Path is a directory, not a file' };
       }
 
-      // Read file content
       const fileContent = await fsp.readFile(filePath);
-      log.info('File read successfully:', filePath);
 
       return {
         success: true,
@@ -890,6 +1790,164 @@ function registerIpcHandlers() {
       };
     }
   });
+
+  // ==================== IDE integration handler ====================
+  ipcMain.handle(
+    'get-project-folder-path',
+    async (
+      _event,
+      email: string,
+      projectId: string,
+      userId?: string | number | null
+    ) => {
+      const manager = checkManagerInstance(fileReader, 'FileReader');
+      const result = manager.createProjectStructure(email, projectId, userId);
+      return result.path;
+    }
+  );
+
+  ipcMain.handle(
+    'open-in-ide',
+    async (_event, folderPath: string, ide: string) => {
+      const getIDECommand = (): string => {
+        const platform = process.platform;
+        const homeDir = homedir();
+
+        if (ide === 'vscode') {
+          if (platform === 'darwin') {
+            // macOS: Check common VS Code CLI paths
+            const vscodePaths = [
+              '/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code',
+              '/usr/local/bin/code',
+            ];
+            for (const p of vscodePaths) {
+              if (existsSync(p)) return p;
+            }
+            log.warn(
+              '[IDE] VS Code not found on macOS, using system file manager'
+            );
+            return '';
+          } else if (platform === 'win32') {
+            // Windows: Check common VS Code paths
+            const vscodePaths = [
+              path.join(
+                homeDir,
+                'AppData',
+                'Local',
+                'Programs',
+                'Microsoft VS Code',
+                'bin',
+                'code.cmd'
+              ),
+              path.join(
+                homeDir,
+                'AppData',
+                'Local',
+                'Programs',
+                'Microsoft VS Code',
+                'Code.exe'
+              ),
+              'C:\\Program Files\\Microsoft VS Code\\bin\\code.cmd',
+              'C:\\Program Files\\Microsoft VS Code\\Code.exe',
+            ];
+            for (const p of vscodePaths) {
+              if (existsSync(p)) return p;
+            }
+            log.warn(
+              '[IDE] VS Code not found on Windows, using system file manager'
+            );
+            return '';
+          }
+          return 'code'; // Linux
+        } else if (ide === 'cursor') {
+          if (platform === 'darwin') {
+            // macOS: Check common Cursor CLI paths
+            const cursorPaths = [
+              '/Applications/Cursor.app/Contents/Resources/app/bin/cursor',
+              '/usr/local/bin/cursor',
+            ];
+            for (const p of cursorPaths) {
+              if (existsSync(p)) return p;
+            }
+            log.warn(
+              '[IDE] Cursor not found on macOS, using system file manager'
+            );
+            return '';
+          } else if (platform === 'win32') {
+            // Windows: Check common Cursor paths
+            const cursorPaths = [
+              path.join(
+                homeDir,
+                'AppData',
+                'Local',
+                'Programs',
+                'Cursor',
+                'resources',
+                'app',
+                'bin',
+                'cursor.cmd'
+              ),
+              path.join(
+                homeDir,
+                'AppData',
+                'Local',
+                'Programs',
+                'Cursor',
+                'Cursor.exe'
+              ),
+              path.join(homeDir, 'AppData', 'Local', 'Cursor', 'Cursor.exe'),
+            ];
+            for (const p of cursorPaths) {
+              if (existsSync(p)) return p;
+            }
+            log.warn(
+              '[IDE] Cursor not found on Windows, using system file manager'
+            );
+            return '';
+          }
+          return 'cursor'; // Linux
+        }
+        return '';
+      };
+
+      const cmd = getIDECommand();
+      if (!cmd) {
+        // IDE not found or 'system' selected - open with system file manager
+        const errorMsg = await shell.openPath(folderPath);
+        if (errorMsg) {
+          log.error('[IDE] shell.openPath error:', errorMsg);
+          return { success: false, error: errorMsg };
+        }
+        return { success: true };
+      }
+
+      return new Promise<{ success: boolean; error?: string }>((resolve) => {
+        // Use shell: true so .cmd/.bat wrappers work on Windows
+        const child = spawn(cmd, [folderPath], {
+          shell: true,
+          stdio: 'ignore',
+          detached: true,
+        });
+        child.unref();
+
+        child.on('error', (error) => {
+          log.warn(
+            `[IDE] ${cmd} not found, falling back to system file manager:`,
+            error.message
+          );
+          shell.openPath(folderPath).then((errorMsg) => {
+            resolve(
+              errorMsg ? { success: false, error: errorMsg } : { success: true }
+            );
+          });
+        });
+
+        child.on('spawn', () => {
+          resolve({ success: true });
+        });
+      });
+    }
+  );
 
   // ==================== env handler ====================
 
@@ -982,6 +2040,16 @@ function registerIpcHandlers() {
     return { success: true };
   });
 
+  // ==================== read global env handler ====================
+  const ALLOWED_GLOBAL_ENV_KEYS = new Set(['HTTP_PROXY', 'HTTPS_PROXY']);
+  ipcMain.handle('read-global-env', async (_event, key: string) => {
+    if (!ALLOWED_GLOBAL_ENV_KEYS.has(key)) {
+      log.warn(`[ENV] Blocked read of disallowed global env key: ${key}`);
+      return { value: null };
+    }
+    return { value: readGlobalEnvKey(key) };
+  });
+
   // ==================== new window handler ====================
   ipcMain.handle('open-win', (_, arg) => {
     const childWindow = new BrowserWindow({
@@ -1058,9 +2126,15 @@ function registerIpcHandlers() {
 
   ipcMain.handle(
     'get-file-list',
-    async (_, email: string, taskId: string, projectId?: string) => {
+    async (
+      _,
+      email: string,
+      taskId: string,
+      projectId?: string,
+      userId?: string | number | null
+    ) => {
       const manager = checkManagerInstance(fileReader, 'FileReader');
-      return manager.getFileList(email, taskId, projectId);
+      return manager.getFileList(email, taskId, projectId, userId);
     }
   );
 
@@ -1075,9 +2149,14 @@ function registerIpcHandlers() {
   // New project management handlers
   ipcMain.handle(
     'create-project-structure',
-    async (_, email: string, projectId: string) => {
+    async (
+      _,
+      email: string,
+      projectId: string,
+      userId?: string | number | null
+    ) => {
       const manager = checkManagerInstance(fileReader, 'FileReader');
-      return manager.createProjectStructure(email, projectId);
+      return manager.createProjectStructure(email, projectId, userId);
     }
   );
 
@@ -1104,9 +2183,14 @@ function registerIpcHandlers() {
 
   ipcMain.handle(
     'get-project-file-list',
-    async (_, email: string, projectId: string) => {
+    async (
+      _,
+      email: string,
+      projectId: string,
+      userId?: string | number | null
+    ) => {
       const manager = checkManagerInstance(fileReader, 'FileReader');
-      return manager.getProjectFileList(email, projectId);
+      return manager.getProjectFileList(email, projectId, userId);
     }
   );
 
@@ -1229,6 +2313,7 @@ const ensureEigentDirectories = () => {
     path.join(eigentBase, 'cache'),
     path.join(eigentBase, 'venvs'),
     path.join(eigentBase, 'runtime'),
+    path.join(eigentBase, 'skills'),
   ];
 
   for (const dir of requiredDirs) {
@@ -1240,6 +2325,170 @@ const ensureEigentDirectories = () => {
 
   log.info('.eigent directory structure ensured');
 };
+
+// ==================== skills (used at startup and by IPC) ====================
+const SKILLS_ROOT = path.join(os.homedir(), '.eigent', 'skills');
+const SKILL_FILE = 'SKILL.md';
+const EXAMPLE_SKILL_MARKER = '.eigent-example-skill';
+
+const getExampleSkillsSourceDir = (): string => {
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, 'example-skills');
+  }
+  const devPath = path.join(MAIN_DIST, 'resources', 'example-skills');
+  if (existsSync(devPath)) return devPath;
+  return path.join(app.getAppPath(), 'resources', 'example-skills');
+};
+
+async function copyDirRecursive(src: string, dst: string): Promise<void> {
+  await fsp.mkdir(dst, { recursive: true });
+  const entries = await fsp.readdir(src, { withFileTypes: true });
+  for (const entry of entries) {
+    // Skip symlinks to prevent copying files from outside the source tree
+    if (entry.isSymbolicLink()) continue;
+    const srcPath = path.join(src, entry.name);
+    const dstPath = path.join(dst, entry.name);
+    if (entry.isDirectory()) {
+      await copyDirRecursive(srcPath, dstPath);
+    } else {
+      await fsp.copyFile(srcPath, dstPath);
+    }
+  }
+}
+
+function parseSkillName(content: string): string | null {
+  const match = content.match(/^\s*name\s*:\s*(.+)$/m);
+  return match?.[1]?.trim().replace(/^['"]|['"]$/g, '') || null;
+}
+
+async function readSkillName(skillDir: string): Promise<string | null> {
+  try {
+    const content = await fsp.readFile(
+      path.join(skillDir, SKILL_FILE),
+      'utf-8'
+    );
+    return parseSkillName(content);
+  } catch {
+    return null;
+  }
+}
+
+async function isManagedExampleSkill(
+  dstDir: string,
+  srcDir: string
+): Promise<boolean> {
+  if (existsSync(path.join(dstDir, EXAMPLE_SKILL_MARKER))) return true;
+  const [dstName, srcName] = await Promise.all([
+    readSkillName(dstDir),
+    readSkillName(srcDir),
+  ]);
+  return !!dstName && dstName === srcName;
+}
+
+async function writeExampleSkillMarker(
+  dstDir: string,
+  sourceDirName: string
+): Promise<void> {
+  await fsp.writeFile(
+    path.join(dstDir, EXAMPLE_SKILL_MARKER),
+    `source=${sourceDirName}\n`,
+    'utf-8'
+  );
+}
+
+async function listRegularFiles(
+  root: string,
+  ignoredNames = new Set<string>()
+): Promise<Map<string, string>> {
+  const files = new Map<string, string>();
+  const walk = async (dir: string) => {
+    const entries = await fsp.readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isSymbolicLink() || ignoredNames.has(entry.name)) continue;
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(fullPath);
+      } else if (entry.isFile()) {
+        files.set(path.relative(root, fullPath), fullPath);
+      }
+    }
+  };
+  await walk(root);
+  return files;
+}
+
+async function dirContentsMatch(src: string, dst: string): Promise<boolean> {
+  const [srcFiles, dstFiles] = await Promise.all([
+    listRegularFiles(src),
+    listRegularFiles(dst, new Set([EXAMPLE_SKILL_MARKER])),
+  ]);
+  if (srcFiles.size !== dstFiles.size) return false;
+  for (const [relativePath, srcPath] of srcFiles) {
+    const dstPath = dstFiles.get(relativePath);
+    if (!dstPath) return false;
+    const [srcContent, dstContent] = await Promise.all([
+      fsp.readFile(srcPath),
+      fsp.readFile(dstPath),
+    ]);
+    if (!srcContent.equals(dstContent)) return false;
+  }
+  return true;
+}
+
+async function syncDefaultSkillsFromBundle(): Promise<void> {
+  if (!existsSync(SKILLS_ROOT)) {
+    await fsp.mkdir(SKILLS_ROOT, { recursive: true });
+  }
+  const exampleDir = getExampleSkillsSourceDir();
+  if (!existsSync(exampleDir)) {
+    log.warn('Example skills source dir missing:', exampleDir);
+    return;
+  }
+  const sourceEntries = await fsp.readdir(exampleDir, { withFileTypes: true });
+  let copiedCount = 0;
+  let updatedCount = 0;
+  for (const e of sourceEntries) {
+    if (!e.isDirectory() || e.name.startsWith('.')) continue;
+    const skillMd = path.join(exampleDir, e.name, SKILL_FILE);
+    if (!existsSync(skillMd)) continue;
+    const destDir = path.join(SKILLS_ROOT, e.name);
+    const srcDir = path.join(exampleDir, e.name);
+    if (!existsSync(destDir)) {
+      await copyDirRecursive(srcDir, destDir);
+      await writeExampleSkillMarker(destDir, e.name);
+      copiedCount++;
+      continue;
+    }
+
+    const destStats = await fsp.stat(destDir).catch(() => null);
+    if (!destStats?.isDirectory()) continue;
+
+    if (!(await isManagedExampleSkill(destDir, srcDir))) {
+      log.warn('Skipping default skill sync due to local conflict:', destDir);
+      continue;
+    }
+
+    if (await dirContentsMatch(srcDir, destDir)) {
+      await writeExampleSkillMarker(destDir, e.name);
+      continue;
+    }
+
+    await fsp.rm(destDir, { recursive: true, force: true });
+    await copyDirRecursive(srcDir, destDir);
+    await writeExampleSkillMarker(destDir, e.name);
+    updatedCount++;
+  }
+  if (copiedCount > 0 || updatedCount > 0) {
+    log.info(
+      `Synced default skill(s) to ~/.eigent/skills: copied=${copiedCount} updated=${updatedCount} from`,
+      exampleDir
+    );
+  }
+}
+
+async function seedDefaultSkillsIfEmpty(): Promise<void> {
+  await syncDefaultSkillsFromBundle();
+}
 
 // ==================== Shared backend startup logic ====================
 // Starts backend after installation completes
@@ -1262,10 +2511,39 @@ let installationLock: Promise<PromiseReturnType> = Promise.resolve({
 
 // ==================== window create ====================
 async function createWindow() {
+  const existingWindow =
+    win && !win.isDestroyed() ? win : BrowserWindow.getAllWindows()[0];
+  if (existingWindow && !existingWindow.isDestroyed()) {
+    win = existingWindow;
+    win.focus();
+    return;
+  }
+
+  if (createWindowPromise) {
+    await createWindowPromise;
+    if (win && !win.isDestroyed()) {
+      win.focus();
+    }
+    return;
+  }
+
+  createWindowPromise = createWindowInternal().finally(() => {
+    createWindowPromise = null;
+  });
+
+  return createWindowPromise;
+}
+
+async function createWindowInternal() {
   const isMac = process.platform === 'darwin';
+  const isWindows = process.platform === 'win32';
 
   // Ensure .eigent directories exist before anything else
   ensureEigentDirectories();
+  await seedDefaultSkillsIfEmpty();
+
+  // Load persisted CDP browser pool from disk
+  loadCdpPool();
 
   log.info(
     `[PROJECT BROWSER WINDOW] Creating BrowserWindow which will start Chrome with CDP on port ${browser_port}`
@@ -1281,22 +2559,39 @@ async function createWindow() {
     )}`
   );
 
+  // Platform-specific window configuration
+  // Windows: native frame and solid background. macOS/Linux: frameless; macOS corner radius via native hook.
   win = new BrowserWindow({
     title: 'Eigent',
-    width: 1200,
-    height: 800,
-    minWidth: 1050,
-    minHeight: 650,
-    frame: false,
+    width: 1280,
+    height: 960,
+    minWidth: 1100,
+    minHeight: 700,
+    // Use native frame on Windows for better native integration
+    frame: isWindows ? true : false,
     show: false, // Don't show until content is ready to avoid white screen
-    transparent: true,
-    vibrancy: 'sidebar',
-    visualEffectState: 'active',
-    backgroundColor: '#f5f5f580',
+    // Only use transparency on macOS and Linux (not supported well on Windows)
+    transparent: !isWindows,
+    // Solid on Windows; macOS solid without vibrancy; Linux unchanged semi-transparent tint
+    backgroundColor: isWindows
+      ? nativeTheme.shouldUseDarkColors
+        ? '#1e1e1e'
+        : '#ffffff'
+      : isMac
+        ? nativeTheme.shouldUseDarkColors
+          ? '#1e1e1e'
+          : '#f5f5f5'
+        : '#f5f5f580',
+    // macOS-specific title bar styling
     titleBarStyle: isMac ? 'hidden' : undefined,
-    trafficLightPosition: isMac ? { x: 10, y: 10 } : undefined,
+    trafficLightPosition: isMac ? { x: 10, y: 12 } : undefined,
     icon: path.join(VITE_PUBLIC, 'favicon.ico'),
-    roundedCorners: true,
+    // Rounded corners on macOS and Linux (as original)
+    roundedCorners: !isWindows,
+    // Windows-specific options
+    ...(isWindows && {
+      autoHideMenuBar: true, // Hide menu bar on Windows for cleaner look
+    }),
     webPreferences: {
       // Use a dedicated partition for main window to isolate from webviews
       // This ensures main window's auth data (localStorage) is stored separately and persists across restarts
@@ -1309,6 +2604,67 @@ async function createWindow() {
       spellcheck: false,
     },
   });
+
+  // Renderer <webview> guests (session preview browser) host arbitrary web
+  // content, and the host window itself runs with elevated webPreferences.
+  // Enforce safe guest settings at attach time so no tag attribute (even one
+  // forged by a compromised renderer) can grant a guest host privileges.
+  win.webContents.on('will-attach-webview', (event, webPreferences, params) => {
+    delete webPreferences.preload;
+    webPreferences.nodeIntegration = false;
+    webPreferences.contextIsolation = true;
+    webPreferences.webSecurity = true;
+    webPreferences.partition = PREVIEW_WEBVIEW_PARTITION;
+
+    if (
+      params.partition !== PREVIEW_WEBVIEW_PARTITION ||
+      !isHttpOrHttpsUrl(params.src)
+    ) {
+      event.preventDefault();
+    }
+  });
+
+  // Route window.open / target=_blank into the same guest instead of spawning
+  // popup windows, and only allow web URLs. Together with the attach guard
+  // above, this is the only main-process involvement the guests need.
+  win.webContents.on('did-attach-webview', (_event, contents) => {
+    const preventUnsafeNavigation = (
+      event: Electron.Event,
+      navigationUrl: string
+    ) => {
+      if (!isHttpOrHttpsUrl(navigationUrl)) {
+        event.preventDefault();
+      }
+    };
+    const guestNavigationEvents = contents as unknown as {
+      on: (
+        eventName: string,
+        listener: (event: Electron.Event, navigationUrl: string) => void
+      ) => void;
+    };
+
+    guestNavigationEvents.on('will-navigate', preventUnsafeNavigation);
+    guestNavigationEvents.on('will-frame-navigate', preventUnsafeNavigation);
+    guestNavigationEvents.on('will-redirect', preventUnsafeNavigation);
+    contents.setWindowOpenHandler(({ url }) => {
+      if (isHttpOrHttpsUrl(url)) {
+        void contents.loadURL(url);
+      }
+      return { action: 'deny' };
+    });
+  });
+
+  if (process.platform === 'darwin') {
+    win.once('ready-to-show', () => {
+      if (win && !win.isDestroyed()) {
+        try {
+          setRoundedCorners(win, 20);
+        } catch (error) {
+          log.error('[MacOS] Failed to apply rounded corners:', error);
+        }
+      }
+    });
+  }
 
   // ==================== Handle renderer crashes and failed loads ====================
   win.webContents.on('render-process-gone', (event, details) => {
@@ -1328,22 +2684,28 @@ async function createWindow() {
     }
   });
 
-  win.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL) => {
-    log.error(`[RENDERER] Failed to load: ${errorCode} - ${errorDescription} - ${validatedURL}`);
-    // Retry loading after a delay
-    if (errorCode !== -3) { // -3 is USER_CANCELLED, don't retry
-      setTimeout(() => {
-        if (win && !win.isDestroyed()) {
-          log.info('[RENDERER] Retrying load after failure...');
-          if (VITE_DEV_SERVER_URL) {
-            win.loadURL(VITE_DEV_SERVER_URL);
-          } else {
-            win.loadFile(indexHtml);
+  win.webContents.on(
+    'did-fail-load',
+    (event, errorCode, errorDescription, validatedURL) => {
+      log.error(
+        `[RENDERER] Failed to load: ${errorCode} - ${errorDescription} - ${validatedURL}`
+      );
+      // Retry loading after a delay
+      if (errorCode !== -3) {
+        // -3 is USER_CANCELLED, don't retry
+        setTimeout(() => {
+          if (win && !win.isDestroyed()) {
+            log.info('[RENDERER] Retrying load after failure...');
+            if (VITE_DEV_SERVER_URL) {
+              win.loadURL(VITE_DEV_SERVER_URL);
+            } else {
+              win.loadFile(indexHtml);
+            }
           }
-        }
-      }, 2000);
+        }, 2000);
+      }
     }
-  });
+  );
 
   // Main window now uses default userData directly with partition 'persist:main_window'
   // No migration needed - data is already persistent
@@ -1425,6 +2787,9 @@ async function createWindow() {
   setupExternalLinkHandling();
   handleBeforeClose();
 
+  // Start CDP health-check polling (probes every 3s, removes dead browsers)
+  startCdpHealthCheck();
+
   // ==================== auto update ====================
   update(win);
 
@@ -1435,11 +2800,8 @@ async function createWindow() {
   let hasPrebuiltDeps = false;
   if (app.isPackaged) {
     const prebuiltBinDir = path.join(process.resourcesPath, 'prebuilt', 'bin');
-    const prebuiltVenvDir = path.join(
-      process.resourcesPath,
-      'prebuilt',
-      'venv'
-    );
+    const prebuiltDir = path.join(process.resourcesPath, 'prebuilt');
+    const prebuiltVenvDir = path.join(prebuiltDir, 'venv');
     const uvPath = path.join(
       prebuiltBinDir,
       process.platform === 'win32' ? 'uv.exe' : 'uv'
@@ -1450,10 +2812,9 @@ async function createWindow() {
     );
     const pyvenvCfg = path.join(prebuiltVenvDir, 'pyvenv.cfg');
 
+    const hasVenv = fs.existsSync(pyvenvCfg);
     hasPrebuiltDeps =
-      fs.existsSync(uvPath) &&
-      fs.existsSync(bunPath) &&
-      fs.existsSync(pyvenvCfg);
+      fs.existsSync(uvPath) && fs.existsSync(bunPath) && hasVenv;
     if (hasPrebuiltDeps) {
       log.info(
         '[PRE-CHECK] Prebuilt dependencies found, skipping installation check'
@@ -1478,9 +2839,9 @@ async function createWindow() {
   const installedLockPath = path.join(backendPath, 'uv_installed.lock');
   const installationCompleted = fs.existsSync(installedLockPath);
 
-  // Check if venv path exists for current version
-  const venvPath = getVenvPath(currentVersion);
-  const venvExists = fs.existsSync(venvPath);
+  // Check venv existence WITHOUT triggering extraction (defers to startBackend when window is visible)
+  const { exists: venvExists, path: venvPath } =
+    checkVenvExistsForPreCheck(currentVersion);
 
   // If prebuilt deps are available, skip installation
   const needsInstallation = hasPrebuiltDeps
@@ -1552,7 +2913,7 @@ async function createWindow() {
                   language: 'system',
                   isFirstLaunch: true,
                   modelType: 'cloud',
-                  cloud_model_type: 'gpt-4.1',
+                  cloud_model_type: 'gpt-5.4',
                   initState: 'carousel',
                   share_token: null,
                   workerListData: {}
@@ -1664,6 +3025,7 @@ const setupWindowEventListeners = () => {
 // ==================== devtools shortcuts ====================
 const setupDevToolsShortcuts = () => {
   if (!win) return;
+  if (app.isPackaged) return;
 
   const toggleDevTools = () => win?.webContents.toggleDevTools();
 
@@ -1740,58 +3102,112 @@ const setupExternalLinkHandling = () => {
 };
 
 // ==================== check and start backend ====================
-const checkAndStartBackend = async () => {
-  log.info('Checking and starting backend service...');
-  try {
-    // Clean up any existing backend process before starting new one
-    if (python_process && !python_process.killed) {
-      log.info('Cleaning up existing backend process before restart...');
-      await cleanupPythonProcess();
-      python_process = null;
-    }
+async function restartBackendService(): Promise<BackendStartResult> {
+  if (backendStartPromise) {
+    log.info(
+      'Backend startup already in progress, waiting before forced restart...'
+    );
+    await backendStartPromise;
+  }
 
-    const isToolInstalled = await checkToolInstalled();
-    if (isToolInstalled.success) {
-      log.info('Tool installed, starting backend service...');
+  log.info('Restarting backend service...');
+  return checkAndStartBackend({ forceRestart: true });
+}
 
-      // Start backend and wait for health check to pass
-      python_process = await startBackend((port) => {
-        backendPort = port;
-        log.info('Backend service started successfully', { port });
-      });
+const checkAndStartBackend = async (
+  options: BackendStartOptions = {}
+): Promise<BackendStartResult> => {
+  if (backendStartPromise) {
+    log.info('Backend startup already in progress, waiting...');
+    return backendStartPromise;
+  }
 
-      // Notify frontend that backend is ready
-      if (win && !win.isDestroyed()) {
+  backendStartPromise = (async () => {
+    log.info('Checking and starting backend service...');
+    try {
+      if (isPythonProcessRunning()) {
+        if (!options.forceRestart) {
+          const isHealthy = await checkBackendHealth(backendPort);
+          if (isHealthy) {
+            log.info('Backend service is already running', {
+              port: backendPort,
+            });
+            const result: BackendStartResult = {
+              success: true,
+              port: backendPort,
+            };
+            notifyBackendReady(result);
+            return result;
+          }
+
+          log.warn(
+            'Backend process is running but health check failed; restarting...'
+          );
+        } else {
+          log.info('Cleaning up existing backend process before restart...');
+        }
+
+        await cleanupPythonProcess();
+      } else if (python_process) {
+        python_process = null;
+      }
+
+      const isToolInstalled = await checkToolInstalled();
+      if (isToolInstalled.success) {
+        log.info('Tool installed, starting backend service...');
+        const codexResolverEnv = await getCodexResolverEnv();
+        const exampleSkillsDir = getExampleSkillsSourceDir();
+
+        // Start backend and wait for health check to pass
+        python_process = await startBackend(
+          (port) => {
+            backendPort = port;
+            log.info('Backend service started successfully', { port });
+          },
+          {
+            ...codexResolverEnv,
+            EIGENT_EXAMPLE_SKILLS_DIR: exampleSkillsDir,
+          }
+        );
+
+        // Notify frontend that backend is ready
         log.info('Backend is ready, notifying frontend...');
-        win.webContents.send('backend-ready', {
+        const result: BackendStartResult = {
           success: true,
           port: backendPort,
-        });
-      }
+        };
+        notifyBackendReady(result);
 
-      python_process?.on('exit', (code, signal) => {
-        log.info('Python process exited', { code, signal });
-      });
-    } else {
-      log.warn('Tool not installed, cannot start backend service');
-      // Notify frontend that backend cannot start
-      if (win && !win.isDestroyed()) {
-        win.webContents.send('backend-ready', {
+        python_process?.on('exit', (code, signal) => {
+          log.info('Python process exited', { code, signal });
+        });
+
+        return result;
+      } else {
+        log.warn('Tool not installed, cannot start backend service');
+        // Notify frontend that backend cannot start
+        const result: BackendStartResult = {
           success: false,
           error: 'Tools not installed',
-        });
+        };
+        notifyBackendReady(result);
+        return result;
       }
-    }
-  } catch (error) {
-    log.error('Failed to start backend:', error);
-    // Notify frontend of backend startup failure
-    if (win && !win.isDestroyed()) {
-      win.webContents.send('backend-ready', {
+    } catch (error) {
+      log.error('Failed to start backend:', error);
+      // Notify frontend of backend startup failure
+      const result: BackendStartResult = {
         success: false,
-        error: String(error),
-      });
+        error: formatErrorMessage(error),
+      };
+      notifyBackendReady(result);
+      return result;
     }
-  }
+  })().finally(() => {
+    backendStartPromise = null;
+  });
+
+  return backendStartPromise;
 };
 
 // ==================== process cleanup ====================
@@ -1898,9 +3314,8 @@ app.whenReady().then(async () => {
     try {
       log.info('[DEVTOOLS] Installing React DevTools extension...');
       // Dynamic import to avoid bundling in production
-      const { default: installExtension, REACT_DEVELOPER_TOOLS } = await import(
-        'electron-devtools-installer'
-      );
+      const { default: installExtension, REACT_DEVELOPER_TOOLS } =
+        await import('electron-devtools-installer');
       const name = await installExtension(REACT_DEVELOPER_TOOLS, {
         loadExtensionOptions: { allowFileAccess: true },
       });
@@ -1920,9 +3335,20 @@ app.whenReady().then(async () => {
   session.fromPartition('persist:main_window').setUserAgent(normalUserAgent);
   log.info('[ANTI-FINGERPRINT] User Agent set for all sessions');
 
+  // ==================== Apply proxy to Electron sessions ====================
+  if (proxyUrl) {
+    const proxyConfig = { proxyRules: proxyUrl };
+    await session.defaultSession.setProxy(proxyConfig);
+    await session.fromPartition('persist:user_login').setProxy(proxyConfig);
+    await session.fromPartition('persist:main_window').setProxy(proxyConfig);
+    log.info(
+      `[PROXY] Applied proxy to all sessions: ${maskProxyUrl(proxyUrl)}`
+    );
+  }
+
   // ==================== download handle ====================
-  session.defaultSession.on('will-download', (event, item, webContents) => {
-    item.once('done', (event, state) => {
+  session.defaultSession.on('will-download', (event, item, _webContents) => {
+    item.once('done', (_event, _state) => {
       shell.showItemInFolder(item.getURL().replace('localfile://', ''));
     });
   });
@@ -1931,10 +3357,35 @@ app.whenReady().then(async () => {
   // Register protocol handler for both default session and main window session
   const protocolHandler = async (request: Request) => {
     const url = decodeURIComponent(request.url.replace('localfile://', ''));
-    const filePath = path.normalize(url);
+    const normalizedUrl = url.replace(/^\/([A-Za-z]:[\\/])/, '$1');
+    const filePath = path.resolve(path.normalize(normalizedUrl));
 
     log.info(`[PROTOCOL] Handling localfile request: ${request.url}`);
-    log.info(`[PROTOCOL] Decoded path: ${filePath}`);
+    log.info(`[PROTOCOL] Resolved path: ${filePath}`);
+
+    // Security: Restrict file access to allowed directories only.
+    // Without this check, path traversal (e.g. /../../../etc/passwd)
+    // would allow reading arbitrary files on the filesystem.
+    const allowedBases = [
+      os.homedir(),
+      app.getPath('userData'),
+      app.getPath('temp'),
+    ];
+
+    const isPathAllowed = allowedBases.some((base) => {
+      const resolvedBase = path.resolve(base);
+      return (
+        filePath === resolvedBase ||
+        filePath.startsWith(resolvedBase + path.sep)
+      );
+    });
+
+    if (!isPathAllowed) {
+      log.error(
+        `[PROTOCOL] Security: Blocked access to path outside allowed directories: ${filePath}`
+      );
+      return new Response('Forbidden', { status: 403 });
+    }
 
     try {
       // Check if file exists
@@ -2015,6 +3466,9 @@ app.whenReady().then(async () => {
 app.on('window-all-closed', () => {
   log.info('window-all-closed');
 
+  // Stop polling when no window is open (important on macOS reopen flow).
+  stopCdpHealthCheck();
+
   // Clean up WebView manager
   if (webViewManager) {
     webViewManager.destroy();
@@ -2032,15 +3486,21 @@ app.on('window-all-closed', () => {
 });
 
 // ==================== app activate event ====================
-app.on('activate', () => {
+app.on('activate', async () => {
   const allWindows = BrowserWindow.getAllWindows();
   log.info('activate', allWindows.length);
 
   if (allWindows.length) {
     allWindows[0].focus();
   } else {
-    cleanupPythonProcess();
-    createWindow();
+    const backendStart = checkAndStartBackend();
+    await createWindow();
+    const result = await backendStart;
+    if (!result.success) {
+      log.warn('Backend start during app activation failed:', result.error);
+    } else {
+      notifyBackendReady(result);
+    }
   }
 });
 
@@ -2048,6 +3508,9 @@ app.on('activate', () => {
 app.on('before-quit', async (event) => {
   log.info('before-quit');
   log.info('quit python_process.pid: ' + python_process?.pid);
+
+  // Stop CDP health-check polling
+  stopCdpHealthCheck();
 
   // Prevent default quit to ensure cleanup completes
   event.preventDefault();

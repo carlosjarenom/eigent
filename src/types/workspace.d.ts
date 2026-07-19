@@ -12,11 +12,17 @@
 // limitations under the License.
 // ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 
-// Global type definitions for WorkspaceMenu component
+// Global type definitions shared by workforce / workspace UI
 
 declare global {
-	type WorkspaceType = 'workflow' | 'developer_agent' | 'browser_agent' | 'document_agent' | 'multi_modal_agent' | 'social_medium_agent' | null;
+  type WorkspaceType =
+    | 'workflow'
+    | 'developer_agent'
+    | 'browser_agent'
+    | 'document_agent'
+    | 'multi_modal_agent'
+    | 'social_media_agent'
+    | null;
 }
 
-
-export { }; 	
+export {};

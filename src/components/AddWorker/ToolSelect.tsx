@@ -12,806 +12,969 @@
 // limitations under the License.
 // ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 
-import React, {
-	useEffect,
-	useRef,
-	useState,
-	useImperativeHandle,
-	forwardRef,
-} from "react";
-import { Badge } from "@/components/ui/badge";
-import { CircleAlert, Store, X } from "lucide-react";
-import { proxyFetchGet, proxyFetchPost, proxyFetchPut, fetchPost, fetchGet } from "@/api/http";
-import { Input } from "../ui/input";
-import { Textarea } from "../ui/textarea";
-import { Button } from "../ui/button";
-import githubIcon from "@/assets/github.svg";
-import { TooltipSimple } from "../ui/tooltip";
-import IntegrationList from "@/components/IntegrationList";
-import { getProxyBaseURL } from "@/lib";
-import { capitalizeFirstLetter } from "@/lib";
-import { useAuthStore } from "@/store/authStore";
-import { useTranslation } from "react-i18next";
+import { mcpInstall } from '@/api/brain';
+import {
+  fetchGet,
+  fetchPost,
+  proxyFetchGet,
+  proxyFetchPost,
+  proxyFetchPut,
+} from '@/api/http';
+import IntegrationList from '@/components/Dashboard/IntegrationList';
+import { Badge } from '@/components/ui/badge';
+import {
+  useIntegrationManagement,
+  type IntegrationItem,
+} from '@/hooks/useIntegrationManagement';
+import { useHost } from '@/host';
+import { capitalizeFirstLetter, getProxyBaseURL } from '@/lib';
+import { cn } from '@/lib/utils';
+import { useAuthStore } from '@/store/authStore';
+import type { TFunction } from 'i18next';
+import { CircleAlert, X } from 'lucide-react';
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+import { useTranslation } from 'react-i18next';
+import { Checkbox } from '../ui/checkbox';
+import { Textarea } from '../ui/textarea';
+import { TooltipSimple } from '../ui/tooltip';
+
 interface McpItem {
-	id: number;
-	name: string;
-	key: string;
-	description: string;
-	category?: { name: string };
-	home_page?: string;
-	install_command?: {
-		env?: { [key: string]: string };
-	};
-	toolkit?: string;
-	isLocal?: boolean;
+  id: number;
+  name: string;
+  key: string;
+  description: string;
+  category?: { name: string };
+  home_page?: string;
+  install_command?: {
+    env?: { [key: string]: string };
+  };
+  toolkit?: string;
+  isLocal?: boolean;
 }
 
 interface ToolSelectProps {
-	onShowEnvConfig?: (mcp: McpItem) => void;
-	onSelectedToolsChange?: (tools: McpItem[]) => void;
-	initialSelectedTools?: McpItem[];
+  onShowEnvConfig?: (mcp: McpItem) => void;
+  onSelectedToolsChange?: (tools: McpItem[]) => void;
+  initialSelectedTools?: McpItem[];
+}
+
+type ToolSelectAddOption = (item: McpItem, isLocal?: boolean) => void;
+
+type ToolSelectCatalogSnapshot = {
+  email: string | null;
+  configInfo: Record<string, any> | null;
+  userMcps: any[];
+  hasUserMcps: boolean;
+};
+
+/** Session cache so Add Worker tool list + user MCPs show immediately when reopening. */
+let toolSelectCatalogSnapshot: ToolSelectCatalogSnapshot | null = null;
+
+/** Built-in MCP entries hidden from picker and connectors UI. */
+const EXCLUDED_BUILTIN_MCP = ['Search', 'RAG'];
+
+function buildIntegrationsFromConfigInfo(
+  res: unknown,
+  keyword: string | undefined,
+  t: TFunction,
+  addOption: ToolSelectAddOption
+): any[] {
+  if (!res || typeof res !== 'object' || (res as any).error) {
+    return [];
+  }
+  const body = res as Record<string, any>;
+  const baseURL = getProxyBaseURL();
+
+  return Object.entries(body)
+    .filter(([key]) => !EXCLUDED_BUILTIN_MCP.includes(key))
+    .filter(([key]) => {
+      if (!keyword) return true;
+      return key.toLowerCase().includes(keyword.toLowerCase());
+    })
+    .map(([key, value]: [string, any]) => {
+      let onInstall: IntegrationItem['onInstall'] | null = null;
+
+      if (key.toLowerCase() === 'notion') {
+        onInstall = async () => {
+          try {
+            const response = await fetchPost('/install/tool/notion');
+            if (response.success) {
+              if (response.warning) {
+                console.warn(
+                  'Notion MCP connection warning:',
+                  response.warning
+                );
+              }
+              await proxyFetchPost('/api/v1/configs', {
+                config_group: 'Notion',
+                config_name: 'MCP_REMOTE_CONFIG_DIR',
+                config_value: response.toolkit_name || 'NotionMCPToolkit',
+              });
+              console.log('Notion MCP installed successfully');
+              const notionItem = {
+                id: 0,
+                key: key,
+                name: key,
+                description:
+                  'Notion workspace integration for reading and managing Notion pages',
+                toolkit: 'notion_mcp_toolkit',
+                isLocal: true,
+              };
+              addOption(notionItem, true);
+            } else {
+              console.error(
+                'Failed to install Notion MCP:',
+                response.error || 'Unknown error'
+              );
+              throw new Error(response.error || 'Failed to install Notion MCP');
+            }
+          } catch (error: any) {
+            console.error('Failed to install Notion MCP:', error.message);
+            throw error;
+          }
+        };
+      } else if (key.toLowerCase() === 'google calendar') {
+        onInstall = async () => {
+          try {
+            const response = await fetchPost('/install/tool/google_calendar');
+            if (response.success) {
+              if (response.warning) {
+                console.warn(
+                  'Google Calendar connection warning:',
+                  response.warning
+                );
+              }
+              try {
+                const existingConfigs = await proxyFetchGet('/api/v1/configs');
+                const existing = Array.isArray(existingConfigs)
+                  ? existingConfigs.find(
+                      (c: any) =>
+                        c.config_group?.toLowerCase() === 'google calendar' &&
+                        c.config_name === 'GOOGLE_REFRESH_TOKEN'
+                    )
+                  : null;
+
+                const configPayload = {
+                  config_group: 'Google Calendar',
+                  config_name: 'GOOGLE_REFRESH_TOKEN',
+                  config_value: 'exists',
+                };
+
+                if (existing) {
+                  await proxyFetchPut(
+                    `/api/v1/configs/${existing.id}`,
+                    configPayload
+                  );
+                } else {
+                  await proxyFetchPost('/api/v1/configs', configPayload);
+                }
+              } catch (configError) {
+                console.warn(
+                  'Failed to persist Google Calendar config',
+                  configError
+                );
+              }
+              console.log('Google Calendar installed successfully');
+              const calendarItem = {
+                id: 0,
+                key: key,
+                name: key,
+                description:
+                  'Google Calendar integration for managing events and schedules',
+                toolkit: 'google_calendar_toolkit',
+                isLocal: true,
+              };
+              addOption(calendarItem, true);
+            } else if (response.status === 'authorizing') {
+              console.log(
+                'Google Calendar authorization in progress. Please complete in browser.'
+              );
+              if (response.message) {
+                console.log(response.message);
+              }
+            } else {
+              console.error(
+                'Failed to install Google Calendar:',
+                response.error || 'Unknown error'
+              );
+              throw new Error(
+                response.error || 'Failed to install Google Calendar'
+              );
+            }
+            return response;
+          } catch (error: any) {
+            if (!error.message?.includes('authorization')) {
+              console.error(
+                'Failed to install Google Calendar:',
+                error.message
+              );
+              throw error;
+            }
+            return null;
+          }
+        };
+      } else {
+        onInstall = () => {
+          window.open(
+            `${baseURL}/api/v1/oauth/${key.toLowerCase()}/login`,
+            '_blank',
+            'width=600,height=700'
+          );
+        };
+      }
+
+      return {
+        key: key,
+        name: key,
+        env_vars: value.env_vars,
+        toolkit: value.toolkit,
+        desc:
+          value.env_vars && value.env_vars.length > 0
+            ? `${t('layout.environmental-variables-required')} ${value.env_vars.join(
+                ', '
+              )}`
+            : key.toLowerCase() === 'notion'
+              ? t('layout.notion-workspace-integration')
+              : key.toLowerCase() === 'google calendar'
+                ? t('layout.google-calendar-integration')
+                : '',
+        onInstall,
+      };
+    });
 }
 
 const ToolSelect = forwardRef<
-	{ installMcp: (id: number, env?: any, activeMcp?: any) => Promise<void> },
-	ToolSelectProps
+  { installMcp: (id: number, env?: any, activeMcp?: any) => Promise<void> },
+  ToolSelectProps
 >(({ onShowEnvConfig, onSelectedToolsChange, initialSelectedTools }, ref) => {
-	const { t } = useTranslation();
-	// state management - remove internal selected state, use parent passed initialSelectedTools
-	const [keyword, setKeyword] = useState<string>("");
-	const [mcpList, setMcpList] = useState<McpItem[]>([]);
-	const [allMcpList, setAllMcpList] = useState<McpItem[]>([]);
-	const [customMcpList, setCustomMcpList] = useState<any[]>([]);
-	const [isOpen, setIsOpen] = useState(false);
-	const [installed, setInstalled] = useState<{ [id: number]: boolean }>({});
-	const [installing, setInstalling] = useState<{ [id: number]: boolean }>({});
-	const [installedIds, setInstalledIds] = useState<number[]>([]);
-	const { email } = useAuthStore();
-	// add: integration service list
-	const [integrations, setIntegrations] = useState<any[]>([]);
-	const fetchIntegrationsData = (keyword?: string) => {
-		proxyFetchGet("/api/config/info").then((res) => {
-			if (res && typeof res === "object" && !res.error) {
-				const baseURL = getProxyBaseURL();
+  const host = useHost();
+  const electronAPI = host?.electronAPI;
+  const { t } = useTranslation();
+  // state management - remove internal selected state, use parent passed initialSelectedTools
+  const [keyword, setKeyword] = useState<string>('');
+  const { email } = useAuthStore();
+  const [integrations, setIntegrations] = useState<any[]>([]);
+  const [userMcpList, setUserMcpList] = useState<any[]>([]);
 
-				const list = Object.entries(res)
-					.filter(([key]) => {
-						if (!keyword) return true;
-						return key.toLowerCase().includes(keyword.toLowerCase());
-					})
-					.map(([key, value]: [string, any]) => {
-						let onInstall = null;
+  const integrationItems = integrations as IntegrationItem[];
+  const { installed: webInstalled } =
+    useIntegrationManagement(integrationItems);
 
-						// Special handling for Notion MCP
-						if (key.toLowerCase() === 'notion') {
-							onInstall = async () => {
-								try {
-									const response = await fetchPost("/install/tool/notion");
-									if (response.success) {
-										// Check if there's a warning (connection failed but installation marked as complete)
-										if (response.warning) {
-											console.warn("Notion MCP connection warning:", response.warning);
-											// Still proceed but log the warning
-										}
-										// Save to config to mark as installed
-										await proxyFetchPost("/api/configs", {
-											config_group: "Notion",
-											config_name: "MCP_REMOTE_CONFIG_DIR",
-											config_value: response.toolkit_name || "NotionMCPToolkit",
-										});
-										console.log("Notion MCP installed successfully");
-										// After successful installation, add to selected tools
-										const notionItem = {
-											id: 0, // Use 0 for integration items
-											key: key,
-											name: key,
-											description: "Notion workspace integration for reading and managing Notion pages",
-											toolkit: "notion_mcp_toolkit", // Add the toolkit name
-											isLocal: true
-										};
-										addOption(notionItem, true);
-									} else {
-										console.error("Failed to install Notion MCP:", response.error || "Unknown error");
-										throw new Error(response.error || "Failed to install Notion MCP");
-									}
-								} catch (error: any) {
-									console.error("Failed to install Notion MCP:", error.message);
-									throw error;
-								}
-							};
-                        } else if (key.toLowerCase() === 'google calendar') {
-                            onInstall = async () => {
-                                try {
-                                    const response = await fetchPost("/install/tool/google_calendar");
-                                    if (response.success) {
-                                        if (response.warning) {
-                                            console.warn("Google Calendar connection warning:", response.warning);
-                                        }
-                                        try {
-                                            const existingConfigs = await proxyFetchGet("/api/configs");
-                                            const existing = Array.isArray(existingConfigs)
-                                                ? existingConfigs.find((c: any) =>
-                                                    c.config_group?.toLowerCase() === "google calendar" &&
-                                                    c.config_name === "GOOGLE_REFRESH_TOKEN"
-                                                )
-                                                : null;
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
 
-                                            const configPayload = {
-                                                config_group: "Google Calendar",
-                                                config_name: "GOOGLE_REFRESH_TOKEN",
-                                                config_value: "exists",
-                                            };
+  // select management
+  const addOption = useCallback(
+    (item: McpItem, isLocal?: boolean) => {
+      const currentSelected = initialSelectedTools || [];
+      if (isLocal) {
+        if (!currentSelected.find((i) => i.key === item.key)) {
+          const newSelected = [...currentSelected, { ...item, isLocal }];
+          onSelectedToolsChange?.(newSelected);
+        }
+        return;
+      }
+      if (!currentSelected.find((i) => i.id === item.id)) {
+        if (!isLocal) isLocal = false;
+        const newSelected = [...currentSelected, { ...item, isLocal }];
+        onSelectedToolsChange?.(newSelected);
+      }
+    },
+    [initialSelectedTools, onSelectedToolsChange]
+  );
 
-                                            if (existing) {
-                                                await proxyFetchPut(`/api/configs/${existing.id}`, configPayload);
-                                            } else {
-                                                await proxyFetchPost("/api/configs", configPayload);
-                                            }
-                                        } catch (configError) {
-                                            console.warn("Failed to persist Google Calendar config", configError);
-                                        }
-                                        console.log("Google Calendar installed successfully");
-                                        const calendarItem = {
-                                            id: 0, // Use 0 for integration items
-                                            key: key,
-                                            name: key,
-                                            description: "Google Calendar integration for managing events and schedules",
-                                            toolkit: "google_calendar_toolkit", // Add the toolkit name
-                                            isLocal: true
-                                        };
-                                        addOption(calendarItem, true);
-                                    } else if (response.status === "authorizing") {
-                                        console.log("Google Calendar authorization in progress. Please complete in browser.");
-                                        if (response.message) {
-                                            console.log(response.message);
-                                        }
-                                    } else {
-                                        console.error("Failed to install Google Calendar:", response.error || "Unknown error");
-                                        throw new Error(response.error || "Failed to install Google Calendar");
-                                    }
-                                    return response;
-                                } catch (error: any) {
-                                    if (!error.message?.includes("authorization")) {
-                                        console.error("Failed to install Google Calendar:", error.message);
-                                        throw error;
-                                    }
-                                    return null; // Return null on authorization flow errors
-                                }
-                            };
-						} else {
-							onInstall = () =>
-								(window.location.href = `${baseURL}/api/oauth/${key.toLowerCase()}/login`);
-						}
+  const fetchIntegrationsData = useCallback(
+    (keyword?: string, opts?: { force?: boolean }) => {
+      const u = email ?? null;
+      const snap = toolSelectCatalogSnapshot;
+      const hydratedFromCache =
+        !opts?.force && snap && snap.email === u && snap.configInfo;
+      if (hydratedFromCache) {
+        setIntegrations(
+          buildIntegrationsFromConfigInfo(
+            snap.configInfo,
+            keyword,
+            t,
+            addOption
+          )
+        );
+      }
 
-						return {
-							key: key,
-							name: key,
-							env_vars: value.env_vars,
-							toolkit: value.toolkit,
-							desc:
-								value.env_vars && value.env_vars.length > 0
-									? `${t("layout.environmental-variables-required")} ${value.env_vars.join(
-											", "
-									  )}`
-									: key.toLowerCase() === 'notion'
-									? t("layout.notion-workspace-integration")
-									: key.toLowerCase() === 'google calendar'
-									? t("layout.google-calendar-integration")
-									: "",
-							onInstall,
-						};
-					});
-				setIntegrations(list);
-			} else {
-				console.error("Failed to fetch integrations:", res);
-				setIntegrations([]);
-			}
-		}).catch((error) => {
-			console.error("Error fetching integrations:", error);
-			setIntegrations([]);
-		});
-	};
+      proxyFetchGet('/api/v1/config/info')
+        .then((res) => {
+          if (res && typeof res === 'object' && !(res as any).error) {
+            const info = res as Record<string, any>;
+            const prev = toolSelectCatalogSnapshot;
+            const sameUser = prev?.email === u;
+            toolSelectCatalogSnapshot = {
+              email: u,
+              configInfo: info,
+              userMcps: sameUser ? (prev?.userMcps ?? []) : [],
+              hasUserMcps: sameUser ? (prev?.hasUserMcps ?? false) : false,
+            };
+            setIntegrations(
+              buildIntegrationsFromConfigInfo(info, keyword, t, addOption)
+            );
+          } else {
+            console.error('Failed to fetch integrations:', res);
+            setIntegrations([]);
+          }
+        })
+        .catch((error) => {
+          console.error('Error fetching integrations:', error);
+          if (!hydratedFromCache) setIntegrations([]);
+        });
+    },
+    [addOption, email, t]
+  );
 
-	// Refs
-	const inputRef = useRef<HTMLTextAreaElement>(null);
-	const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
-	const containerRef = useRef<HTMLDivElement>(null);
+  const fetchInstalledMcps = useCallback(
+    (opts?: { force?: boolean }) => {
+      const u = email ?? null;
+      const snap = toolSelectCatalogSnapshot;
+      const hydratedFromCache =
+        !opts?.force && snap && snap.email === u && snap.hasUserMcps;
+      if (hydratedFromCache) {
+        setUserMcpList(snap.userMcps);
+      }
 
-	// constants
-	const categoryIconMap: Record<string, string> = {
-		anthropic: "Anthropic",
-		community: "Community",
-		official: "Official",
-		camel: "Camel",
-	};
+      proxyFetchGet('/api/v1/mcp/users')
+        .then((res) => {
+          let dataList: any[] = [];
+          if (Array.isArray(res)) {
+            dataList = res;
+          } else if (res && Array.isArray(res.items)) {
+            dataList = res.items;
+          }
+          setUserMcpList(dataList);
+          const prev = toolSelectCatalogSnapshot;
+          const sameUser = prev?.email === u;
+          toolSelectCatalogSnapshot = {
+            email: u,
+            configInfo: sameUser ? (prev?.configInfo ?? null) : null,
+            userMcps: dataList,
+            hasUserMcps: true,
+          };
+        })
+        .catch((error) => {
+          console.error('Error fetching installed MCPs:', error);
+          if (!hydratedFromCache) setUserMcpList([]);
+        });
+    },
+    [email]
+  );
 
-	const svgIcons = import.meta.glob("@/assets/mcp/*.svg", {
-		eager: true,
-		query: "?url",
-		import: "default",
-	});
+  // public save env/config logic
+  const saveEnvAndConfig = async (
+    provider: string,
+    envVarKey: string,
+    value: string
+  ) => {
+    // First fetch current configs to check for existing ones
+    const configsRes = await proxyFetchGet('/api/v1/configs');
+    const configs = Array.isArray(configsRes) ? configsRes : [];
 
-	// data fetching
-	const fetchData = (keyword?: string) => {
-		proxyFetchGet("/api/mcps", {
-			keyword: keyword || "",
-			page: 1,
-			size: 100,
-		}).then((res) => {
-			// Add defensive check for API errors
-			if (res && res.items && Array.isArray(res.items)) {
-				setAllMcpList(res.items);
-			} else {
-				console.error("Failed to fetch MCPs:", res);
-				setAllMcpList([]);
-			}
-		}).catch((error) => {
-			console.error("Error fetching MCPs:", error);
-			setAllMcpList([]);
-		});
-	};
+    const configPayload = {
+      config_group: capitalizeFirstLetter(provider),
+      config_name: envVarKey,
+      config_value: value,
+    };
 
-	const fetchInstalledMcps = () => {
-		proxyFetchGet("/api/mcp/users").then((res) => {
-			let dataList = [];
-			let ids: number[] = [];
-			if (Array.isArray(res)) {
-				ids = res.map((item: any) => item.mcp_id);
-				dataList = res;
-			} else if (res && Array.isArray(res.items)) {
-				ids = res.items.map((item: any) => item.mcp_id);
-				dataList = res.items;
-			}
-			setInstalledIds(ids);
+    // Check if config already exists
+    const existingConfig = configs.find(
+      (c: any) =>
+        c.config_name === envVarKey &&
+        c.config_group?.toLowerCase() === provider.toLowerCase()
+    );
 
-			const customMcpList = dataList.filter((item: any) => item.mcp_id === 0);
-			setCustomMcpList(customMcpList);
-		}).catch((error) => {
-			console.error("Error fetching installed MCPs:", error);
-			setInstalledIds([]);
-			setCustomMcpList([]);
-		});
-	};
+    if (existingConfig) {
+      // Update existing config
+      await proxyFetchPut(
+        `/api/v1/configs/${existingConfig.id}`,
+        configPayload
+      );
+    } else {
+      // Create new config
+      await proxyFetchPost('/api/v1/configs', configPayload);
+    }
 
-	// only surface installed MCPs from the market list
-    useEffect(() => {
-		// Add defensive check and fix logic: should filter when installedIds has items
-		if (Array.isArray(allMcpList) && installedIds.length > 0) {
-			const filtered = allMcpList.filter((item) => installedIds.includes(item.id));
-			setMcpList(filtered);
-		} else if (Array.isArray(allMcpList)) {
-			// If no installed IDs, show empty list instead of all
-			setMcpList([]);
-		}
-	}, [allMcpList, installedIds]);
+    if (electronAPI?.envWrite) {
+      await electronAPI.envWrite(email, { key: envVarKey, value });
+    }
+  };
+  // MCP install related
+  const installMcp = async (
+    id: number,
+    envValue?: { [key: string]: any },
+    activeMcp?: any
+  ) => {
+    // is exa search or google calendar
+    if (activeMcp && envValue) {
+      const env: { [key: string]: string } = {};
+      Object.keys(envValue).map((key) => {
+        env[key] = envValue[key]?.value;
+      });
+      activeMcp.install_command.env = env;
 
-	// public save env/config logic
-	const saveEnvAndConfig = async (
-		provider: string,
-		envVarKey: string,
-		value: string
-	) => {
-		// First fetch current configs to check for existing ones
-		const configsRes = await proxyFetchGet("/api/configs");
-		const configs = Array.isArray(configsRes) ? configsRes : [];
-		
-		const configPayload = {
-			config_group: capitalizeFirstLetter(provider),
-			config_name: envVarKey,
-			config_value: value,
-		};
-		
-		// Check if config already exists
-		const existingConfig = configs.find(
-			(c: any) => c.config_name === envVarKey && 
-			c.config_group?.toLowerCase() === provider.toLowerCase()
-		);
-		
-		if (existingConfig) {
-			// Update existing config
-			await proxyFetchPut(`/api/configs/${existingConfig.id}`, configPayload);
-		} else {
-			// Create new config
-			await proxyFetchPost("/api/configs", configPayload);
-		}
-		
-		if (window.electronAPI?.envWrite) {
-			await window.electronAPI.envWrite(email, { key: envVarKey, value });
-		}
-	};
-	// MCP install related
-	const installMcp = async (
-		id: number,
-		envValue?: { [key: string]: any },
-		activeMcp?: any
-	) => {
-		// is exa search or google calendar
-		if (activeMcp && envValue) {
-			const env: { [key: string]: string } = {};
-			Object.keys(envValue).map((key) => {
-				env[key] = envValue[key]?.value;
-			});
-			activeMcp.install_command.env = env;
-			
-			// Save all env vars and wait for completion
-			console.log("[installMcp] Saving env vars for", activeMcp.key);
-			try {
-				await Promise.all(
-					Object.keys(activeMcp.install_command.env).map(async (key) => {
-						console.log("[installMcp] Saving", key, "=", activeMcp.install_command.env[key]);
-						return saveEnvAndConfig(
-							activeMcp.key,
-							key,
-							activeMcp.install_command.env[key]
-						);
-					})
-				);
-				console.log("[installMcp] All env vars saved successfully");
-			} catch (error) {
-				console.error("[installMcp] Failed to save env vars:", error);
-				// Continue anyway to trigger installation
-			}
-			
-			if (activeMcp.key !== "Google Calendar") {
-				const integrationItem = integrations.find(
-					(item) => item.key === activeMcp.key
-				);
-				addOption(
-					{
-						id: activeMcp.id,
-						key: activeMcp.key,
-						name: activeMcp.name ?? activeMcp.key,
-						description:
-							typeof integrationItem?.desc === "string"
-								? integrationItem.desc
-								: "",
-						toolkit: integrationItem?.toolkit,
-						isLocal: true,
-					},
-					true
-				);
-				return;
-			}
+      // Save all env vars and wait for completion
+      console.log('[installMcp] Saving env vars for', activeMcp.key);
+      try {
+        await Promise.all(
+          Object.keys(activeMcp.install_command.env).map(async (key) => {
+            console.log(
+              '[installMcp] Saving',
+              key,
+              '=',
+              activeMcp.install_command.env[key]
+            );
+            return saveEnvAndConfig(
+              activeMcp.key,
+              key,
+              activeMcp.install_command.env[key]
+            );
+          })
+        );
+        console.log('[installMcp] All env vars saved successfully');
+      } catch (error) {
+        console.error('[installMcp] Failed to save env vars:', error);
+        // Continue anyway to trigger installation
+      }
 
-			// Trigger instantiation for Google Calendar
-			if (activeMcp.key === "Google Calendar") {
-				console.log("[ToolSelect installMcp] Starting Google Calendar installation");
-				try {
-				const response = await fetchPost("/install/tool/google_calendar");
-				
-				if (response.success) {
-					console.log("[ToolSelect installMcp] Immediate success");
-					// Mark as successfully installed by writing refresh token marker
-					const existingConfigs = await proxyFetchGet("/api/configs");
-					const existing = Array.isArray(existingConfigs)
-						? existingConfigs.find((c: any) =>
-							c.config_group?.toLowerCase() === "google calendar" &&
-							c.config_name === "GOOGLE_REFRESH_TOKEN"
-						)
-						: null;
-					
-					const configPayload = {
-						config_group: "Google Calendar",
-						config_name: "GOOGLE_REFRESH_TOKEN",
-						config_value: "exists",
-					};
-					
-					if (existing) {
-						await proxyFetchPut(`/api/configs/${existing.id}`, configPayload);
-					} else {
-						await proxyFetchPost("/api/configs", configPayload);
-					}
-					
-					// Refresh integrations to update install status
-					fetchIntegrationsData();
-					
-					const selectedItem = {
-						id: activeMcp.id,
-						key: activeMcp.key,
-						name: activeMcp.name,
-						description: "Google Calendar integration for managing events and schedules",
-						toolkit: "google_calendar_toolkit",
-						isLocal: true
-					};
-					addOption(selectedItem, true);
-				} else if (response.status === "authorizing") {
-					// Authorization in progress - browser should have opened
-					console.log("[ToolSelect installMcp] Authorization required, starting polling loop");
-					
-					// WAIT for OAuth status completion instead of using setInterval
-					const start = Date.now();
-					const timeoutMs = 5 * 60 * 1000; // 5 minutes
-					
-					while (Date.now() - start < timeoutMs) {
-						try {
-							const statusResponse = await fetchGet("/oauth/status/google_calendar");
-							console.log("[ToolSelect installMcp] OAuth status:", statusResponse.status);
-							
-							if (statusResponse.status === "success") {
-								console.log("[ToolSelect installMcp] Authorization completed successfully!");
-								
-								// Try installing again now that authorization is complete
-								const retryResponse = await fetchPost("/install/tool/google_calendar");
-								if (retryResponse.success) {
-									// Mark as successfully installed
-									const existingConfigs = await proxyFetchGet("/api/configs");
-									const existing = Array.isArray(existingConfigs)
-										? existingConfigs.find((c: any) =>
-											c.config_group?.toLowerCase() === "google calendar" &&
-											c.config_name === "GOOGLE_REFRESH_TOKEN"
-										)
-										: null;
-									
-									const configPayload = {
-										config_group: "Google Calendar",
-										config_name: "GOOGLE_REFRESH_TOKEN",
-										config_value: "exists",
-									};
-									
-									if (existing) {
-										await proxyFetchPut(`/api/configs/${existing.id}`, configPayload);
-									} else {
-										await proxyFetchPost("/api/configs", configPayload);
-									}
-									
-									fetchIntegrationsData();
-									
-									const selectedItem = {
-										id: activeMcp.id,
-										key: activeMcp.key,
-										name: activeMcp.name,
-										description: "Google Calendar integration for managing events and schedules",
-										toolkit: "google_calendar_toolkit",
-										isLocal: true
-									};
-									addOption(selectedItem, true);
-								}
-								console.log("[ToolSelect installMcp] Installation complete, returning");
-								return;
-							} else if (statusResponse.status === "failed") {
-								console.error("[ToolSelect installMcp] Authorization failed:", statusResponse.error);
-								return;
-							} else if (statusResponse.status === "cancelled") {
-								console.log("[ToolSelect installMcp] Authorization cancelled");
-								return;
-							}
-						} catch (error) {
-							console.error("[ToolSelect installMcp] Error polling OAuth status:", error);
-						}
-						
-						// Wait before next poll
-						await new Promise((r) => setTimeout(r, 1500));
-					}
-					
-					console.log("[ToolSelect installMcp] Polling timeout");
-					return;
-				} else {
-					console.error("Failed to install Google Calendar:", response.error || "Unknown error");
-				}
-			} catch (error: any) {
-				console.error("Failed to install Google Calendar:", error.message);
-			}
-		}
-			return;
-		}
-		setInstalling((prev) => ({ ...prev, [id]: true }));
-		try {
-			await proxyFetchPost("/api/mcp/install?mcp_id=" + id);
-			setInstalled((prev) => ({ ...prev, [id]: true }));
-			const installedMcp = mcpList.find((mcp) => mcp.id === id);
-			if (window.ipcRenderer && installedMcp) {
-				const env: { [key: string]: string } = {};
-				if (envValue) {
-					Object.keys(envValue).map((key) => {
-						env[key] = envValue[key]?.value;
-					});
-					installedMcp.install_command!.env = env;
-				}
+      if (activeMcp.key !== 'Google Calendar') {
+        const integrationItem = integrations.find(
+          (item) => item.key === activeMcp.key
+        );
+        addOption(
+          {
+            id: activeMcp.id,
+            key: activeMcp.key,
+            name: activeMcp.name ?? activeMcp.key,
+            description:
+              typeof integrationItem?.desc === 'string'
+                ? integrationItem.desc
+                : '',
+            toolkit: integrationItem?.toolkit,
+            isLocal: true,
+          },
+          true
+        );
+        return;
+      }
 
-				await window.ipcRenderer.invoke(
-					"mcp-install",
-					installedMcp.key,
-					installedMcp.install_command
-				);
-			}
-			// after install successfully, automatically add to selected list
-			if (installedMcp) {
-				addOption(installedMcp);
-			}
-		} catch (e) {
-			console.error("Failed to install MCP:", e);
-		} finally {
-			setInstalling((prev) => ({ ...prev, [id]: false }));
-		}
-	};
+      // Trigger instantiation for Google Calendar
+      if (activeMcp.key === 'Google Calendar') {
+        console.log(
+          '[ToolSelect installMcp] Starting Google Calendar installation'
+        );
+        try {
+          const response = await fetchPost('/install/tool/google_calendar');
 
-	// expose install method to parent component
-	useImperativeHandle(ref, () => ({
-		installMcp,
-	}));
+          if (response.success) {
+            console.log('[ToolSelect installMcp] Immediate success');
+            // Mark as successfully installed by writing refresh token marker
+            const existingConfigs = await proxyFetchGet('/api/v1/configs');
+            const existing = Array.isArray(existingConfigs)
+              ? existingConfigs.find(
+                  (c: any) =>
+                    c.config_group?.toLowerCase() === 'google calendar' &&
+                    c.config_name === 'GOOGLE_REFRESH_TOKEN'
+                )
+              : null;
 
-	const checkEnv = (id: number) => {
-		const mcp = mcpList.find((mcp) => mcp.id === id);
-		if (mcp && Object.keys(mcp?.install_command?.env || {}).length > 0) {
-			if (onShowEnvConfig) {
-				onShowEnvConfig(mcp);
-			}
-		} else {
-			installMcp(id);
-		}
-	};
+            const configPayload = {
+              config_group: 'Google Calendar',
+              config_name: 'GOOGLE_REFRESH_TOKEN',
+              config_value: 'exists',
+            };
 
-	// select management
-	const addOption = (item: McpItem, isLocal?: boolean) => {
-		setKeyword("");
-		const currentSelected = initialSelectedTools || [];
-		console.log(currentSelected.find((i) => i.id === item.id));
-		if (isLocal) {
-			if (!currentSelected.find((i) => i.key === item.key)) {
-				const newSelected = [...currentSelected, { ...item, isLocal }];
-				onSelectedToolsChange?.(newSelected);
-			}
-			return;
-		}
-		if (!currentSelected.find((i) => i.id === item.id)) {
-			if (!isLocal) isLocal = false;
-			const newSelected = [...currentSelected, { ...item, isLocal }];
-			onSelectedToolsChange?.(newSelected);
-		}
-		
-	};
+            if (existing) {
+              await proxyFetchPut(
+                `/api/v1/configs/${existing.id}`,
+                configPayload
+              );
+            } else {
+              await proxyFetchPost('/api/v1/configs', configPayload);
+            }
 
-	const removeOption = (item: McpItem) => {
-		const currentSelected = initialSelectedTools || [];
-		const newSelected = currentSelected.filter((i) => i.id !== item.id);
-		onSelectedToolsChange?.(newSelected);
-	};
+            // Refresh integrations to update install status
+            fetchIntegrationsData(undefined, { force: true });
 
-	// tool functions
-	const getCategoryIcon = (categoryName?: string) => {
-		if (!categoryName) return <Store className="w-4 h-4 text-icon-primary" />;
+            const selectedItem = {
+              id: activeMcp.id,
+              key: activeMcp.key,
+              name: activeMcp.name,
+              description:
+                'Google Calendar integration for managing events and schedules',
+              toolkit: 'google_calendar_toolkit',
+              isLocal: true,
+            };
+            addOption(selectedItem, true);
+          } else if (response.status === 'authorizing') {
+            // Authorization in progress - browser should have opened
+            console.log(
+              '[ToolSelect installMcp] Authorization required, starting polling loop'
+            );
 
-		const iconKey = categoryIconMap[categoryName];
-		const iconUrl = iconKey
-			? (svgIcons[`/src/assets/mcp/${iconKey}.svg`] as string)
-			: undefined;
+            // WAIT for OAuth status completion instead of using setInterval
+            const start = Date.now();
+            const timeoutMs = 5 * 60 * 1000; // 5 minutes
 
-		return iconUrl ? (
-			<img src={iconUrl} alt={categoryName} className="w-4 h-4" />
-		) : (
-			<Store className="w-4 h-4 text-icon-primary" />
-		);
-	};
+            while (Date.now() - start < timeoutMs) {
+              try {
+                const statusResponse = await fetchGet(
+                  '/oauth/status/google_calendar'
+                );
+                console.log(
+                  '[ToolSelect installMcp] OAuth status:',
+                  statusResponse.status
+                );
 
-	const getGithubRepoName = (homePage?: string) => {
-		if (!homePage || !homePage.startsWith("https://github.com/")) return null;
-		const parts = homePage.split("/");
-		return parts.length > 4 ? parts[4] : homePage;
-	};
+                if (statusResponse.status === 'success') {
+                  console.log(
+                    '[ToolSelect installMcp] Authorization completed successfully!'
+                  );
 
-	const getInstallButtonText = (itemId: number) => {
-		if (installedIds.includes(itemId)) return t("layout.installed");
-		if (installing[itemId]) return t("layout.installing");
-		if (installed[itemId]) return t("layout.installed");
-		return t("layout.install");
-	};
+                  // Try installing again now that authorization is complete
+                  const retryResponse = await fetchPost(
+                    '/install/tool/google_calendar'
+                  );
+                  if (retryResponse.success) {
+                    // Mark as successfully installed
+                    const existingConfigs =
+                      await proxyFetchGet('/api/v1/configs');
+                    const existing = Array.isArray(existingConfigs)
+                      ? existingConfigs.find(
+                          (c: any) =>
+                            c.config_group?.toLowerCase() ===
+                              'google calendar' &&
+                            c.config_name === 'GOOGLE_REFRESH_TOKEN'
+                        )
+                      : null;
 
-	// Effects
-	useEffect(() => {
-		fetchData();
-		fetchIntegrationsData();
-		fetchInstalledMcps();
-	}, []);
+                    const configPayload = {
+                      config_group: 'Google Calendar',
+                      config_name: 'GOOGLE_REFRESH_TOKEN',
+                      config_value: 'exists',
+                    };
 
-	useEffect(() => {
-		if (debounceTimerRef.current) {
-			clearTimeout(debounceTimerRef.current);
-		}
+                    if (existing) {
+                      await proxyFetchPut(
+                        `/api/v1/configs/${existing.id}`,
+                        configPayload
+                      );
+                    } else {
+                      await proxyFetchPost('/api/v1/configs', configPayload);
+                    }
 
-		debounceTimerRef.current = setTimeout(() => {
-			fetchData(keyword);
-			fetchIntegrationsData(keyword);
-		}, 500);
+                    fetchIntegrationsData(undefined, { force: true });
 
-		return () => {
-			if (debounceTimerRef.current) {
-				clearTimeout(debounceTimerRef.current);
-			}
-		};
-	}, [keyword]);
+                    const selectedItem = {
+                      id: activeMcp.id,
+                      key: activeMcp.key,
+                      name: activeMcp.name,
+                      description:
+                        'Google Calendar integration for managing events and schedules',
+                      toolkit: 'google_calendar_toolkit',
+                      isLocal: true,
+                    };
+                    addOption(selectedItem, true);
+                  }
+                  console.log(
+                    '[ToolSelect installMcp] Installation complete, returning'
+                  );
+                  return;
+                } else if (statusResponse.status === 'failed') {
+                  console.error(
+                    '[ToolSelect installMcp] Authorization failed:',
+                    statusResponse.error
+                  );
+                  return;
+                } else if (statusResponse.status === 'cancelled') {
+                  console.log(
+                    '[ToolSelect installMcp] Authorization cancelled'
+                  );
+                  return;
+                }
+              } catch (error) {
+                console.error(
+                  '[ToolSelect installMcp] Error polling OAuth status:',
+                  error
+                );
+              }
 
-	useEffect(() => {
-		const handleClickOutside = (event: MouseEvent) => {
-			if (
-				containerRef.current &&
-				!containerRef.current.contains(event.target as Node)
-			) {
-				setIsOpen(false);
-			}
-		};
+              // Wait before next poll
+              await new Promise((r) => setTimeout(r, 1500));
+            }
 
-		document.addEventListener("mousedown", handleClickOutside);
-		return () => {
-			document.removeEventListener("mousedown", handleClickOutside);
-		};
-	}, []);
+            console.log('[ToolSelect installMcp] Polling timeout');
+            return;
+          } else {
+            console.error(
+              'Failed to install Google Calendar:',
+              response.error || 'Unknown error'
+            );
+          }
+        } catch (error: any) {
+          console.error('Failed to install Google Calendar:', error.message);
+        }
+      }
+      return;
+    }
+    try {
+      await proxyFetchPost('/api/v1/mcp/install?mcp_id=' + id);
+      const listRes = await proxyFetchGet('/api/v1/mcps', {
+        page: 1,
+        size: 200,
+        keyword: '',
+      });
+      const items =
+        listRes?.items && Array.isArray(listRes.items) ? listRes.items : [];
+      const installedMcp = items.find((mcp: McpItem) => mcp.id === id);
+      if (installedMcp?.install_command) {
+        const installCmd = { ...installedMcp.install_command };
+        if (envValue) {
+          const env: { [key: string]: string } = {};
+          Object.keys(envValue).map((key) => {
+            env[key] = envValue[key]?.value;
+          });
+          installCmd.env = env;
+        }
+        await mcpInstall(installedMcp.key, installCmd);
+      }
+      if (installedMcp) {
+        addOption(installedMcp);
+      }
+      void fetchInstalledMcps({ force: true });
+    } catch (e) {
+      console.error('Failed to install MCP:', e);
+    }
+  };
 
-	// render functions
-	const renderSelectedItems = () => (
-		<>
-			{(initialSelectedTools || []).map((item: any) => (
-				<Badge
-					key={item.id + item.key + (item.isLocal + "")}
-					className="h-5 bg-button-tertiery-fill-default flex items-center gap-1 w-auto flex-shrink-0 px-xs"
-				>
-					{item.name || item.mcp_name || item.key || `tool_${item.id}`}
-					<div className="flex items-center justify-center bg-button-secondary-fill-disabled rounded-sm">
-						<X
-							className="w-4 h-4 cursor-pointer text-button-secondary-icon-disabled"
-							onClick={() => removeOption(item)}
-						/>
-					</div>
-				</Badge>
-			))}
-		</>
-	);
+  // expose install method to parent component
+  useImperativeHandle(ref, () => ({
+    installMcp,
+  }));
 
-	const renderMcpItem = (item: McpItem) => (
-		<div
-			key={item.id}
-			onClick={() => {
-				// check if already installed
-				const isAlreadyInstalled =
-					installedIds.includes(item.id) || installed[item.id];
+  const removeOption = useCallback(
+    (item: McpItem) => {
+      const currentSelected = initialSelectedTools || [];
+      const newSelected = currentSelected.filter((row) => {
+        const bothLocal =
+          row.isLocal === true &&
+          item.isLocal === true &&
+          row.key != null &&
+          item.key != null &&
+          String(row.key) !== '' &&
+          String(item.key) !== '';
+        if (bothLocal) {
+          return row.key !== item.key;
+        }
+        return row.id !== item.id;
+      });
+      onSelectedToolsChange?.(newSelected);
+    },
+    [initialSelectedTools, onSelectedToolsChange]
+  );
 
-				if (isAlreadyInstalled) {
-					// if already installed, add to selected list directly
-					addOption(item);
-					setKeyword("");
-				} else {
-					// if not installed, first check environment configuration, then install and add to selected list
-					checkEnv(item.id);
-				}
-			}}
-			className="cursor-pointer hover:bg-gray-100 px-3 py-2 flex justify-between"
-		>
-			<div className="flex items-center gap-1">
-				{getCategoryIcon(item.category?.name)}
-				<div className="text-sm font-bold leading-17 text-text-action overflow-hidden text-ellipsis break-words line-clamp-1">
-					{item.name}
-				</div>
-				<TooltipSimple content={item.description}>
-					<CircleAlert
-							className="w-4 h-4 text-icon-primary cursor-pointer"
-							onClick={(e) => e.stopPropagation()}
-						/>
-				</TooltipSimple>
-			</div>
-			<div className="flex items-center gap-1">
-				{getGithubRepoName(item.home_page) && (
-					<div className="flex items-center">
-						<img
-							src={githubIcon}
-							alt="github"
-							style={{
-								width: 14.7,
-								height: 14.7,
-								marginRight: 4,
-								display: "inline-block",
-								verticalAlign: "middle",
-							}}
-						/>
-						<span className="self-stretch items-center justify-center text-xs font-medium leading-3 overflow-hidden text-ellipsis break-words line-clamp-1">
-							{getGithubRepoName(item.home_page)}
-						</span>
-					</div>
-				)}
-				<Button
-					variant="primary"
-					size="sm"
-					disabled={
-						installed[item.id] ||
-						installing[item.id] ||
-						installedIds.includes(item.id)
-					}
-					onClick={(e) => {
-						e.stopPropagation();
-						checkEnv(item.id);
-					}}
-				>
-					{getInstallButtonText(item.id)}
-				</Button>
-			</div>
-		</div>
-	);
+  const buildLocalToolFromIntegration = useCallback(
+    (item: IntegrationItem): McpItem => {
+      const normalizedToolkit =
+        item.name === 'Notion' ? 'notion_mcp_toolkit' : item.toolkit;
+      return {
+        id: 0,
+        key: item.key,
+        name: item.name,
+        description: typeof item.desc === 'string' ? item.desc : '',
+        toolkit: normalizedToolkit,
+        isLocal: true,
+      };
+    },
+    []
+  );
 
-	const renderCustomMcpItem = (item: any) => (
-		<div
-			key={item.id}
-			onClick={() => {
-				addOption(item);
-				setKeyword("");
-			}}
-			className="cursor-pointer hover:bg-gray-100 px-3 py-2 flex justify-between"
-		>
-			<div className="flex items-center gap-1">
-				{/* {getCategoryIcon(item.category?.name)} */}
-				<div className="text-sm font-bold leading-17 text-text-action overflow-hidden text-ellipsis break-words line-clamp-1">
-					{item.mcp_name}
-				</div>
-				<TooltipSimple content={item.mcp_desc}>
-					<CircleAlert
-						className="w-4 h-4 text-icon-primary cursor-pointer"
-						onClick={(e) => e.stopPropagation()}
-					/>
-				</TooltipSimple>
-			</div>
-			<div className="flex items-center gap-1">
-				<Button
-					className="leading-17 text-xs font-bold text-button-secondary-text-default h-6 px-sm py-xs bg-button-secondary-fill-default hover:bg-button-tertiery-text-default rounded-md shadow-sm"
-					disabled={true}
-				>
-					{t("layout.installed")}
-				</Button>
-			</div>
-		</div>
-	);
-	return (
-		<div className="w-full relative" ref={containerRef}>
-			<div className="flex flex-wrap gap-1.5 min-h-[40px] border rounded-lg bg-white">
-				<div className="text-text-body text-sm leading-normal font-bold flex items-center gap-1">
-					{t("workforce.agent-tool")}
-					<TooltipSimple content={t("workforce.agent-tool-tooltip")}>
-						<CircleAlert size={16} className="text-icon-primary" />
-					</TooltipSimple>
-				</div>
-				<div
-					onClick={() => {
-						inputRef.current?.focus();
-						setIsOpen(true);
-					}}
-					className="flex flex-wrap gap-1 justify-start px-[6px] py-1 min-h-[60px] max-h-[120px] overflow-y-auto w-full rounded-lg border border-solid border-input-border-default bg-input-bg-default"
-				>
-					{renderSelectedItems()}
-					<Textarea
-						variant="none"
-						value={keyword}
-						onChange={(e) => setKeyword(e.target.value)}
-						onFocus={() => setIsOpen(true)}
-						ref={inputRef}
-						className="bg-transparent border-none !shadow-none text-sm leading-normal !ring-0 !ring-offset-0 w-auto !h-[20px] p-0 resize-none"
-					/>
-				</div>
-			</div>
+  const isIntegrationInAgentSelection = useCallback(
+    (item: IntegrationItem) =>
+      !!(initialSelectedTools || []).find(
+        (s) => s.isLocal && s.key === item.key
+      ),
+    [initialSelectedTools]
+  );
 
-			{/* floating dropdown */}
-			{isOpen && (
-				<div className="absolute top-full left-0 right-0 z-50 mt-1 bg-dropdown-bg rounded-lg border border-solid border-input-border-default overflow-y-auto">
-					<div className="max-h-[192px] overflow-y-auto">
-					<IntegrationList
-						variant="select"
-						onShowEnvConfig={onShowEnvConfig}
-						addOption={addOption}
-						items={integrations}
-						translationNamespace="layout"
-					/>
-						{mcpList
-							.filter(
-								(opt) =>
-									!(initialSelectedTools || []).find((i) => i.id === opt.id)
-							)
-							.map(renderMcpItem)}
-						{customMcpList
-							.filter(
-								(opt) =>
-									!(initialSelectedTools || []).find((i) => i.id === opt.id)
-							)
-							.map(renderCustomMcpItem)}
-					</div>
-				</div>
-			)}
-		</div>
-	);
+  const handleToggleIntegrationForAgent = useCallback(
+    (item: IntegrationItem, selected: boolean) => {
+      if (selected) {
+        addOption(buildLocalToolFromIntegration(item), true);
+      } else {
+        const found = (initialSelectedTools || []).find(
+          (s) => s.isLocal && s.key === item.key
+        );
+        if (found) removeOption(found);
+      }
+    },
+    [
+      addOption,
+      buildLocalToolFromIntegration,
+      initialSelectedTools,
+      removeOption,
+    ]
+  );
+
+  const handleToggleUserMcp = useCallback(
+    (row: any, selected: boolean) => {
+      if (selected) {
+        addOption({
+          id: row.id,
+          key: row.mcp_key || String(row.id),
+          name: row.mcp_name || row.mcp_key,
+          description: String(row.mcp_desc || ''),
+          mcp_name: row.mcp_name,
+        } as McpItem);
+      } else {
+        const found = (initialSelectedTools || []).find((i) => i.id === row.id);
+        if (found) removeOption(found);
+      }
+    },
+    [addOption, initialSelectedTools, removeOption]
+  );
+
+  // Effects
+  useEffect(() => {
+    fetchIntegrationsData();
+    fetchInstalledMcps();
+  }, [fetchIntegrationsData, fetchInstalledMcps]);
+
+  useEffect(() => {
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+    }
+
+    debounceTimerRef.current = setTimeout(() => {
+      fetchIntegrationsData(keyword);
+    }, 500);
+
+    return () => {
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+      }
+    };
+  }, [keyword, fetchIntegrationsData]);
+
+  const webConnectedItems = useMemo(() => {
+    const kw = keyword.trim().toLowerCase();
+    return integrations
+      .filter((i: IntegrationItem) => webInstalled[i.key])
+      .filter((i: IntegrationItem) => {
+        if (!kw) return true;
+        const descStr = typeof i.desc === 'string' ? i.desc.toLowerCase() : '';
+        return (
+          (i.key || '').toLowerCase().includes(kw) ||
+          (i.name || '').toLowerCase().includes(kw) ||
+          descStr.includes(kw)
+        );
+      });
+  }, [integrations, webInstalled, keyword]);
+
+  const webNotConnectedItems = useMemo(() => {
+    const kw = keyword.trim().toLowerCase();
+    return integrations
+      .filter((i: IntegrationItem) => !webInstalled[i.key])
+      .filter((i: IntegrationItem) => {
+        if (!kw) return true;
+        const descStr = typeof i.desc === 'string' ? i.desc.toLowerCase() : '';
+        return (
+          (i.key || '').toLowerCase().includes(kw) ||
+          (i.name || '').toLowerCase().includes(kw) ||
+          descStr.includes(kw)
+        );
+      });
+  }, [integrations, webInstalled, keyword]);
+
+  const ownPicks = useMemo(() => {
+    const kw = keyword.trim().toLowerCase();
+    return userMcpList.filter((opt) => {
+      if (!kw) return true;
+      const name = String(opt.mcp_name || '').toLowerCase();
+      const desc = String(opt.mcp_desc || '').toLowerCase();
+      const key = String(opt.mcp_key || '').toLowerCase();
+      return name.includes(kw) || desc.includes(kw) || key.includes(kw);
+    });
+  }, [userMcpList, keyword]);
+
+  const listHasItems =
+    webConnectedItems.length > 0 ||
+    webNotConnectedItems.length > 0 ||
+    ownPicks.length > 0;
+
+  const showSearchPlaceholder =
+    keyword.length === 0 && (initialSelectedTools?.length ?? 0) === 0;
+
+  // render functions
+  const renderSelectedItems = () => (
+    <>
+      {(initialSelectedTools || []).map((item: any) => (
+        <Badge
+          key={item.id + item.key + (item.isLocal + '')}
+          variant="secondary"
+          size="sm"
+          className="flex w-auto flex-shrink-0"
+        >
+          {item.name || item.mcp_name || item.key || `tool_${item.id}`}
+          <div className="flex items-center justify-center rounded-sm bg-transparent">
+            <X
+              className="h-4 w-4 shrink-0 cursor-pointer text-ds-text-neutral-default-disabled hover:text-ds-text-neutral-default-default"
+              onClick={() => removeOption(item)}
+            />
+          </div>
+        </Badge>
+      ))}
+    </>
+  );
+
+  const renderCustomMcpItem = (item: any) => {
+    const checked = !!(initialSelectedTools || []).find(
+      (i) => i.id === item.id
+    );
+    const label = String(item.mcp_name || item.mcp_key || '');
+    return (
+      <button
+        key={item.id}
+        type="button"
+        aria-pressed={checked}
+        aria-label={label}
+        onClick={() => handleToggleUserMcp(item, !checked)}
+        className={cn(
+          'flex min-h-0 w-full min-w-0 items-center gap-2 rounded-lg bg-ds-bg-neutral-subtle-default px-3 py-2 text-left last:mb-1',
+          'cursor-pointer border-none shadow-none transition-colors',
+          'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ds-ring-brand-default-focus focus-visible:ring-offset-2 focus-visible:ring-offset-ds-bg-neutral-default-default'
+        )}
+      >
+        <Checkbox
+          checked={checked}
+          tabIndex={-1}
+          className="pointer-events-none"
+          aria-hidden
+        />
+        <span className="line-clamp-2 min-w-0 flex-1 break-words text-sm font-bold leading-5 text-ds-text-neutral-default-default sm:text-base">
+          {capitalizeFirstLetter(item.mcp_name || '')}
+        </span>
+      </button>
+    );
+  };
+
+  return (
+    <div className="w-full min-w-0" ref={containerRef}>
+      <div className="flex w-full min-w-0 flex-col gap-1.5">
+        <div className="flex min-h-5 shrink-0 items-center gap-1 text-sm font-bold leading-normal text-ds-text-neutral-default-default">
+          {t('workforce.agent-tool')}
+          <TooltipSimple content={t('workforce.agent-tool-tooltip')}>
+            <CircleAlert
+              size={16}
+              className="shrink-0 text-ds-icon-neutral-default-default"
+            />
+          </TooltipSimple>
+        </div>
+        <div
+          onMouseDown={() => inputRef.current?.focus()}
+          className={cn(
+            'focus-within:ring-ds-border-brand-default-default/35 flex max-h-[120px] min-h-[40px] w-full min-w-0 flex-wrap content-center items-center justify-start gap-1.5 rounded-lg bg-ds-bg-neutral-default-default px-2 py-1.5 focus-within:ring-2'
+          )}
+        >
+          {renderSelectedItems()}
+          <Textarea
+            variant="none"
+            value={keyword}
+            onChange={(e) => setKeyword(e.target.value)}
+            ref={inputRef}
+            placeholder={
+              showSearchPlaceholder ? t('setting.search-mcp') : undefined
+            }
+            aria-label={t('workforce.agent-tool')}
+            aria-controls="agent-tool-picker-panel"
+            className="!min-h-[20px] min-w-[8ch] flex-1 resize-none border-none p-0 text-sm leading-5 text-ds-text-neutral-default-default !shadow-none !ring-0 !ring-offset-0 placeholder:text-ds-text-neutral-muted-default focus-visible:ring-0"
+            rows={1}
+          />
+        </div>
+
+        <div
+          id="agent-tool-picker-panel"
+          role="region"
+          aria-label={t('workforce.agent-tool')}
+          className="w-full min-w-0 overflow-hidden rounded-lg border border-solid border-ds-border-neutral-subtle-default bg-ds-bg-neutral-default-default"
+        >
+          <div className="scrollbar-always-visible flex h-[260px] min-h-0 flex-col gap-1.5 overflow-y-auto overflow-x-hidden px-2 py-2">
+            {listHasItems ? (
+              <div
+                className="flex min-w-0 flex-col gap-3 text-ds-text-neutral-default-default"
+                data-mcp-list="unified"
+              >
+                {webConnectedItems.length > 0 && (
+                  <div>
+                    <div className="px-2 py-1 text-body-sm font-medium text-ds-text-neutral-subtle-default">
+                      {t('setting.mcp-sidebar-built-in')}
+                    </div>
+                    <IntegrationList
+                      className="!space-y-1.5"
+                      variant="select"
+                      onShowEnvConfig={onShowEnvConfig}
+                      addOption={addOption}
+                      items={webConnectedItems}
+                      translationNamespace="layout"
+                      selectWithCheckbox
+                      isIntegrationSelected={isIntegrationInAgentSelection}
+                      onToggleIntegration={handleToggleIntegrationForAgent}
+                    />
+                  </div>
+                )}
+                {ownPicks.length > 0 && (
+                  <div>
+                    <div className="mb-1 px-2 py-1 text-body-sm font-medium text-ds-text-neutral-subtle-default">
+                      {t('setting.your-own-mcps')}
+                    </div>
+                    <div className="flex min-w-0 flex-col gap-2">
+                      {ownPicks.map(renderCustomMcpItem)}
+                    </div>
+                  </div>
+                )}
+                {webNotConnectedItems.length > 0 && (
+                  <div>
+                    <div className="px-2 py-1 text-body-sm font-medium text-ds-text-neutral-subtle-default">
+                      {t('setting.mcp-sidebar-not-connected')}
+                    </div>
+                    <IntegrationList
+                      className="!space-y-1.5"
+                      variant="select"
+                      onShowEnvConfig={onShowEnvConfig}
+                      addOption={addOption}
+                      items={webNotConnectedItems}
+                      translationNamespace="layout"
+                      selectWithCheckbox
+                      isIntegrationSelected={isIntegrationInAgentSelection}
+                      onToggleIntegration={handleToggleIntegrationForAgent}
+                    />
+                  </div>
+                )}
+              </div>
+            ) : (
+              <p className="break-words px-2 py-2 text-center text-body-md text-ds-text-neutral-muted-default">
+                {t('dashboard.no-results')}
+              </p>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 });
+
+ToolSelect.displayName = 'ToolSelect';
 
 export default ToolSelect;

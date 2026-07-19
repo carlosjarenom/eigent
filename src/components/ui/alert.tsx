@@ -12,39 +12,89 @@
 // limitations under the License.
 // ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 
-import * as React from "react"
-import { cva, type VariantProps } from "class-variance-authority"
+import { cva, type VariantProps } from 'class-variance-authority';
+import * as React from 'react';
 
-import { cn } from "@/lib/utils"
+import { cn } from '@/lib/utils';
+import {
+  normalizeUiTone,
+  type UiTone,
+  type UiToneInput,
+} from './semanticProps';
 
-const alertVariants = cva(
-  "relative w-full rounded-lg border px-4 py-3 text-sm [&>svg+div]:translate-y-[-3px] [&>svg]:absolute [&>svg]:left-4 [&>svg]:top-4 [&>svg]:text-foreground [&>svg~*]:pl-7",
-  {
-    variants: {
-      variant: {
-        default: "bg-background text-foreground",
-        destructive:
-          "border-destructive/50 text-text-cuation dark:border-destructive [&>svg]:text-destructive",
-      },
+const alertBase =
+  'relative w-full rounded-lg border px-4 py-3 text-sm [&>svg+div]:translate-y-[-3px] [&>svg]:absolute [&>svg]:left-4 [&>svg]:top-4 [&>svg~*]:pl-7';
+
+const alertVariants = cva(alertBase, {
+  variants: {
+    tone: {
+      neutral:
+        'border-ds-border-neutral-default-default bg-ds-bg-neutral-default-default text-ds-text-neutral-default-default [&>svg]:text-ds-text-neutral-default-default',
+      error:
+        'border-ds-border-status-error-default-default/50 text-ds-text-status-error-strong-default [&>svg]:text-ds-text-status-error-strong-default',
+      success:
+        'border-ds-border-status-completed-default-default/50 text-ds-text-status-completed-strong-default [&>svg]:text-ds-text-status-completed-strong-default',
+      warning:
+        'border-ds-border-status-pending-default-default/50 text-ds-text-status-pending-strong-default [&>svg]:text-ds-text-status-pending-strong-default',
+      information:
+        'border-ds-border-status-splitting-default-default/50 text-ds-text-status-splitting-strong-default [&>svg]:text-ds-text-status-splitting-strong-default',
     },
-    defaultVariants: {
-      variant: "default",
-    },
+  },
+  defaultVariants: {
+    tone: 'neutral',
+  },
+});
+
+/**
+ * @deprecated Use `Alert` with `tone` (see {@link AlertToneInput}). `default` and
+ * `destructive` map to `tone="neutral"` and `tone="error"` for compatibility.
+ */
+export type AlertVariant = 'default' | 'destructive';
+
+export type AlertToneInput = UiToneInput;
+
+function resolveAlertTone(
+  tone: UiToneInput | undefined,
+  /**
+   * @deprecated Use `tone` instead
+   */
+  variant: AlertVariant | undefined
+): UiTone {
+  if (tone !== undefined) {
+    return normalizeUiTone(tone);
   }
-)
+  if (variant === 'destructive') {
+    return 'error';
+  }
+  return 'neutral';
+}
 
-const Alert = React.forwardRef<
-  HTMLDivElement,
-  React.HTMLAttributes<HTMLDivElement> & VariantProps<typeof alertVariants>
->(({ className, variant, ...props }, ref) => (
-  <div
-    ref={ref}
-    role="alert"
-    className={cn(alertVariants({ variant }), className)}
-    {...props}
-  />
-))
-Alert.displayName = "Alert"
+export type AlertProps = React.HTMLAttributes<HTMLDivElement> &
+  Omit<VariantProps<typeof alertVariants>, 'tone'> & {
+    /** Semantic palette; aligns with `semanticProps` / `Button` `tone`. */
+    tone?: AlertToneInput;
+    /**
+     * @deprecated Use `tone="error"` instead of `variant="destructive"`, and
+     * `tone="neutral"` (or omit) instead of `variant="default"`.
+     */
+    variant?: AlertVariant;
+  };
+
+const Alert = React.forwardRef<HTMLDivElement, AlertProps>(
+  ({ className, tone: toneProp, variant: variantProp, ...props }, ref) => {
+    const effectiveTone = resolveAlertTone(toneProp, variantProp);
+    return (
+      <div
+        ref={ref}
+        role="alert"
+        data-tone={effectiveTone}
+        className={cn(alertVariants({ tone: effectiveTone }), className)}
+        {...props}
+      />
+    );
+  }
+);
+Alert.displayName = 'Alert';
 
 const AlertTitle = React.forwardRef<
   HTMLParagraphElement,
@@ -52,11 +102,11 @@ const AlertTitle = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <h5
     ref={ref}
-    className={cn("mb-1 font-medium leading-none tracking-tight", className)}
+    className={cn('mb-1 font-medium tracking-tight leading-none', className)}
     {...props}
   />
-))
-AlertTitle.displayName = "AlertTitle"
+));
+AlertTitle.displayName = 'AlertTitle';
 
 const AlertDescription = React.forwardRef<
   HTMLParagraphElement,
@@ -64,10 +114,10 @@ const AlertDescription = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <div
     ref={ref}
-    className={cn("text-sm [&_p]:leading-relaxed", className)}
+    className={cn('text-sm [&_p]:leading-relaxed', className)}
     {...props}
   />
-))
-AlertDescription.displayName = "AlertDescription"
+));
+AlertDescription.displayName = 'AlertDescription';
 
-export { Alert, AlertTitle, AlertDescription }
+export { Alert, AlertDescription, AlertTitle, alertVariants };

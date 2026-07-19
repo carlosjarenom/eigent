@@ -12,103 +12,150 @@
 // limitations under the License.
 // ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 
-import { Button } from "@/components/ui/button";
-import { ChevronLeft } from "lucide-react";
-import { cn } from "@/lib/utils";
-import { AnimateIcon } from "@/components/animate-ui/icons/icon";
-import { Orbit } from "@/components/animate-ui/icons/orbit";
-
-/**
- * Variant: Splitting
- */
-export interface BoxHeaderSplittingProps {
-    className?: string;
-}
-
-export const BoxHeaderSplitting = ({ className }: BoxHeaderSplittingProps) => {
-    return (
-        <div
-            className={cn(
-                "flex flex-col gap-1 items-start justify-center w-full",
-                className
-            )}
-        >
-            <div className="box-border flex gap-1 items-center px-2.5 py-0 relative w-full">
-                <Button
-                    variant="ghost"
-                    size="sm"
-                    className="px-1 focus-visible:outline-none focus:ring-0"
-                >
-                    <AnimateIcon animate loop className="justify-center items-center h-4 w-4">
-                        <Orbit size={16} className="text-icon-information" />
-                    </AnimateIcon>
-                </Button>
-
-                <div className="flex-1 flex gap-0.5 items-center min-h-px min-w-px relative">
-                    <span className="font-bold text-text-information text-sm whitespace-nowrap">
-                        Splitting Tasks
-                    </span>
-                </div>
-            </div>
-        </div>
-    );
-};
+import { Button } from '@/components/ui/button';
+import { cn } from '@/lib/utils';
+import { ChevronLeft } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 /**
  * Variant: Confirm
  */
 export interface BoxHeaderConfirmProps {
-    subtitle?: string;
-    onStartTask?: () => void;
-    onEdit?: () => void;
-    className?: string;
-    loading?: boolean;
+  subtitle?: string;
+  onStartTask?: () => void;
+  onEdit?: () => void;
+  className?: string;
+  loading?: boolean;
+  autoStartDeadline?: number | null;
 }
 
 export const BoxHeaderConfirm = ({
-    subtitle,
-    onStartTask,
-    onEdit,
-    className,
-    loading = false,
+  subtitle: _subtitle,
+  onStartTask,
+  onEdit,
+  className,
+  loading = false,
+  autoStartDeadline = null,
 }: BoxHeaderConfirmProps) => {
-    return (
-        <div
-            className={cn(
-                "flex flex-col gap-1 items-start justify-center w-full",
-                className
-            )}
+  const { t } = useTranslation();
+  const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!autoStartDeadline) {
+      setRemainingSeconds(null);
+      return;
+    }
+
+    const updateRemainingSeconds = () => {
+      setRemainingSeconds(
+        Math.max(0, Math.ceil((autoStartDeadline - Date.now()) / 1000))
+      );
+    };
+
+    updateRemainingSeconds();
+    const intervalId = window.setInterval(updateRemainingSeconds, 250);
+    return () => window.clearInterval(intervalId);
+  }, [autoStartDeadline]);
+
+  return (
+    <div
+      className={cn(
+        'mb-2 gap-1 flex w-full flex-col items-start justify-between',
+        className
+      )}
+    >
+      <div className="gap-1 px-2.5 pt-2 relative box-border flex w-full items-center justify-between">
+        <Button
+          variant="ghost"
+          size="sm"
+          buttonContent="icon-only"
+          tone="neutral"
+          buttonRadius="full"
+          className="focus:ring-0 focus-visible:outline-none"
+          onClick={onEdit}
         >
-            <div className="box-border flex gap-1 items-center px-2.5 py-0 relative w-full">
-                <Button
-                    variant="ghost"
-                    size="sm"
-                    className="px-1 focus-visible:outline-none focus:ring-0"
-                    onClick={onEdit}
-                >
-                    <ChevronLeft size={16} className="text-icon-primary" />
-                </Button>
+          <ChevronLeft />
+        </Button>
 
-                <div className="flex-1 flex gap-0.5 items-center min-h-px min-w-px relative">
-                    {subtitle && (
-                        <div className="flex-1 flex flex-col justify-center min-h-px min-w-px overflow-ellipsis overflow-hidden relative">
-                            <span className="font-normal text-text-label text-xs whitespace-nowrap overflow-ellipsis overflow-hidden m-0">
-                                {subtitle}
-                            </span>
-                        </div>
-                    )}
-                </div>
-
-                <Button
-                    variant="success"
-                    size="sm"
-                    className="rounded-full"
-                    onClick={onStartTask}
-                    disabled={loading}
-                >
-                    Start Task
-                </Button>
-            </div>
+        <div className="gap-2 flex items-center">
+          {remainingSeconds !== null && (
+            <span
+              className="text-body-xs font-medium text-ds-text-success-default-default whitespace-nowrap tabular-nums"
+              aria-label={t('chat.auto-start-in', {
+                seconds: remainingSeconds,
+              })}
+            >
+              {t('chat.auto-start-in', { seconds: remainingSeconds })}
+            </span>
+          )}
+          <Button
+            variant="success"
+            size="sm"
+            className="rounded-full"
+            onClick={onStartTask}
+            disabled={loading}
+          >
+            {t('chat.start-task')}
+          </Button>
         </div>
-    );
+      </div>
+    </div>
+  );
+};
+
+/**
+ * Variant: Save
+ *
+ * Mirrors `BoxHeaderConfirm` but the primary action is "Save" — used when the
+ * plan editor has unsaved subtask edits.
+ */
+export interface BoxHeaderSaveProps {
+  subtitle?: string;
+  onSave?: () => void;
+  onEdit?: () => void;
+  className?: string;
+  loading?: boolean;
+}
+
+export const BoxHeaderSave = ({
+  subtitle: _subtitle,
+  onSave,
+  onEdit,
+  className,
+  loading = false,
+}: BoxHeaderSaveProps) => {
+  const { t } = useTranslation();
+  return (
+    <div
+      className={cn(
+        'mb-2 gap-1 flex w-full flex-col items-start justify-between',
+        className
+      )}
+    >
+      <div className="gap-1 px-2.5 pt-2 relative box-border flex w-full items-center justify-between">
+        <Button
+          variant="ghost"
+          size="sm"
+          buttonContent="icon-only"
+          tone="neutral"
+          buttonRadius="full"
+          className="focus:ring-0 focus-visible:outline-none"
+          onClick={onEdit}
+        >
+          <ChevronLeft />
+        </Button>
+
+        <Button
+          variant="success"
+          size="sm"
+          className="rounded-full"
+          onClick={onSave}
+          disabled={loading}
+        >
+          {t('layout.save')}
+        </Button>
+      </div>
+    </div>
+  );
 };

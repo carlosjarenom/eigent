@@ -12,30 +12,74 @@
 // limitations under the License.
 // ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 
-import * as React from "react"
-import * as SwitchPrimitives from "@radix-ui/react-switch"
+import * as SwitchPrimitives from '@radix-ui/react-switch';
+import * as React from 'react';
 
-import { cn } from "@/lib/utils"
+import { cn } from '@/lib/utils';
+import { mergeAliasStyles, switchTokenAliases } from './tokenAliases';
+
+export type SwitchSize = 'default' | 'sm';
+export type SwitchVariant = 'default' | 'outline';
+
+type SwitchProps = React.ComponentPropsWithoutRef<
+  typeof SwitchPrimitives.Root
+> & {
+  size?: SwitchSize;
+  variant?: SwitchVariant;
+};
+
+const sizeClasses = {
+  default: {
+    root: 'h-6 w-11',
+    thumb: 'h-5 w-5 data-[state=checked]:translate-x-5',
+  },
+  sm: {
+    root: 'h-4 w-8',
+    thumb: 'h-3 w-3 data-[state=checked]:translate-x-4',
+  },
+};
+
+const variantClasses: Record<SwitchVariant, { root: string; thumb: string }> = {
+  default: {
+    root: 'shadow-sm border-transparent data-[state=checked]:bg-ds-bg-status-completed-default-default data-[state=unchecked]:bg-ds-bg-neutral-subtle-default',
+    thumb: 'bg-ds-text-brand-inverse-default',
+  },
+  outline: {
+    root: 'data-[state=checked]:bg-ds-bg-status-completed-default-default data-[state=checked]:border-ds-border-status-completed-default-default data-[state=unchecked]:bg-ds-bg-neutral-default-default data-[state=unchecked]:border-ds-border-neutral-default-default',
+    thumb:
+      'bg-ds-text-brand-inverse-default data-[state=unchecked]:bg-ds-bg-neutral-strong-default',
+  },
+};
 
 const Switch = React.forwardRef<
   React.ElementRef<typeof SwitchPrimitives.Root>,
-  React.ComponentPropsWithoutRef<typeof SwitchPrimitives.Root>
->(({ className, ...props }, ref) => (
-  <SwitchPrimitives.Root
-    className={cn(
-      "peer inline-flex h-6 w-11 bg-bg-fill-secondary shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-switch-on-fill-track-fill data-[state=unchecked]:bg-switch-off-fill-track-fill",
-      className
-    )}
-    {...props}
-    ref={ref}
-  >
-    <SwitchPrimitives.Thumb
+  SwitchProps
+>(
+  (
+    { className, size = 'default', variant = 'default', style, ...props },
+    ref
+  ) => (
+    <SwitchPrimitives.Root
       className={cn(
-        "pointer-events-none block h-5 w-5 rounded-full bg-switch-on-fill-thumb-fill shadow-none  ring-0 transition-transform data-[state=checked]:translate-x-5 data-[state=unchecked]:translate-x-0"
+        'peer inline-flex shrink-0 cursor-pointer items-center rounded-full border-2 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ds-ring-brand-default-focus focus-visible:ring-offset-2 focus-visible:ring-offset-ds-bg-neutral-subtle-default disabled:cursor-not-allowed disabled:opacity-50',
+        sizeClasses[size].root,
+        variantClasses[variant].root,
+        className
       )}
-    />
-  </SwitchPrimitives.Root>
-))
-Switch.displayName = SwitchPrimitives.Root.displayName
+      style={mergeAliasStyles(switchTokenAliases, style)}
+      {...props}
+      ref={ref}
+    >
+      <SwitchPrimitives.Thumb
+        className={cn(
+          'pointer-events-none block rounded-full shadow-lg ring-0 transition-transform data-[state=unchecked]:translate-x-0',
+          sizeClasses[size].thumb,
+          variantClasses[variant].thumb
+        )}
+      />
+    </SwitchPrimitives.Root>
+  )
+);
+Switch.displayName = SwitchPrimitives.Root.displayName;
 
-export { Switch }
+export { Switch };

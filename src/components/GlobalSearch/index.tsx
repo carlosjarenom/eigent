@@ -12,73 +12,79 @@
 // limitations under the License.
 // ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 
-import { useState } from "react";
+import { useState } from 'react';
+
+import { Calculator, Calendar, Search, Smile } from 'lucide-react';
 
 import {
-	Calculator,
-	Calendar,
-	Smile,
-} from "lucide-react";
+  CommandDialog,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+  CommandSeparator,
+} from '@/components/ui/command';
+import { DialogTitle } from '@/components/ui/dialog';
+import { useTranslation } from 'react-i18next';
 
-import {
-	CommandItem,
-	CommandList,
-	CommandEmpty,
-	CommandDialog,
-	CommandInput,
-	CommandGroup,
-	CommandSeparator,
-} from "@/components/ui/command";
-import { DialogTitle } from "@/components/ui/dialog";
-import { Search } from "lucide-react";
-import { useTranslation } from "react-i18next";
-const items = [
-	"Apple",
-	"Banana",
-	"Orange",
-	"Grape",
-	"Watermelon",
-	"Pineapple",
-	"Mango",
-	"Blueberry",
-];
+export interface GlobalSearchDialogProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}
+
+export function GlobalSearchDialog({
+  open,
+  onOpenChange,
+}: GlobalSearchDialogProps) {
+  const { t } = useTranslation();
+  return (
+    <CommandDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      overlayClassName="backdrop-blur-none"
+      contentClassName="border-0 bg-ds-bg-neutral-subtle-default shadow-perfect"
+      commandClassName="bg-ds-bg-neutral-subtle-default"
+    >
+      <DialogTitle className="sr-only">{t('dashboard.search')}</DialogTitle>
+      <CommandInput placeholder="Type a command or search..." />
+      <CommandList>
+        <CommandEmpty>{t('dashboard.no-results')}</CommandEmpty>
+        <CommandGroup heading="Today">
+          <CommandItem>
+            <Calendar />
+            <span>{t('dashboard.calendar')}</span>
+          </CommandItem>
+          <CommandItem>
+            <Smile />
+            <span>{t('dashboard.search-emoji')}</span>
+          </CommandItem>
+          <CommandItem>
+            <Calculator />
+            <span>{t('dashboard.calculator')}</span>
+          </CommandItem>
+        </CommandGroup>
+        <CommandSeparator />
+      </CommandList>
+    </CommandDialog>
+  );
+}
 
 export function GlobalSearch() {
-	const [open, setOpen] = useState(false);
-	const { t } = useTranslation();
-	return (
-		<>
-			<div
-				className="h-6 bg-bg-surface-secondary flex items-center justify-center w-60 rounded-lg space-x-2 no-drag"
-				onClick={() => setOpen(true)}
-			>
-				<Search className="w-4 h-4 text-text-secondary"></Search>
-				<span className="text-text-secondary font-inter text-[10px] leading-4">
-					{t("dashboard.search-for-a-task-or-document")}
-				</span>
-			</div>
-			<CommandDialog open={open} onOpenChange={setOpen}>
-				<DialogTitle className="sr-only">{t("dashboard.search")}</DialogTitle>
-				<CommandInput placeholder="Type a command or search..." />
-				<CommandList>
-					<CommandEmpty>{t("dashboard.no-results")}</CommandEmpty>
-					<CommandGroup heading="Today">
-						<CommandItem>
-							<Calendar />
-							<span>{t("dashboard.calendar")}</span>
-						</CommandItem>
-						<CommandItem>
-							<Smile />
-							<span>{t("dashboard.search-emoji")}</span>
-						</CommandItem>
-						<CommandItem>
-							<Calculator />
-							<span>{t("dashboard.calculator")}</span>
-						</CommandItem>
-					</CommandGroup>
-					<CommandSeparator />
-				</CommandList>
-			</CommandDialog>
-		</>
-	);
+  const [open, setOpen] = useState(false);
+  const { t } = useTranslation();
+  return (
+    <>
+      <div
+        className="bg-ds-bg-neutral-subtle-default no-drag h-6 w-60 space-x-2 rounded-lg flex items-center justify-center"
+        onClick={() => setOpen(true)}
+      >
+        <Search className="h-4 w-4 text-ds-text-neutral-muted-default"></Search>
+        <span className="font-inter leading-4 text-ds-text-neutral-muted-default text-[10px]">
+          {t('dashboard.search-for-a-task-or-document')}
+        </span>
+      </div>
+      <GlobalSearchDialog open={open} onOpenChange={setOpen} />
+    </>
+  );
 }

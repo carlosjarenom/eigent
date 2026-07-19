@@ -1,5 +1,13 @@
 /* Import GitHub markdown styles */
 @import 'github-markdown-css/github-markdown.css';
+
+[data-theme='dark'] .markdown-body {
+  color-scheme: dark;
+}
+[data-theme='light'] .markdown-body {
+  color-scheme: light;
+}
+
 /* Custom overrides for better integration */
 .markdown-body {
   box-sizing: border-box;
@@ -18,8 +26,8 @@
   font-weight: 700;
   margin-bottom: 0.5em;
   margin-top: 1em;
-  padding-bottom: 0.3em;
-  border-bottom: 1px solid #e5e7eb;
+  padding-bottom: 0;
+  border-bottom: none !important;
 }
 
 .markdown-body h2 {
@@ -27,8 +35,8 @@
   font-weight: 600;
   margin-bottom: 0.5em;
   margin-top: 1em;
-  padding-bottom: 0.3em;
-  border-bottom: 1px solid #e5e7eb;
+  padding-bottom: 0;
+  border-bottom: none !important;
 }
 
 .markdown-body h3 {
@@ -41,11 +49,19 @@
 .markdown-body p {
   margin-bottom: 0.75em;
   margin-top: 0;
+  font-size: var(--fontSize-sm, 13px);
+  line-height: var(--lineHeight-14, 20px);
 }
 
-/* Code blocks styling */
+/* Code blocks styling.
+   The imported github-markdown-css colors code text via variables keyed to
+   the OS color scheme (prefers-color-scheme), while this file forces the
+   code backgrounds per app theme (data-theme). When the two disagree the
+   text becomes invisible (near-white on the light background and vice
+   versa), so pin the text color alongside each forced background. */
 .markdown-body pre {
   background-color: #f6f8fa;
+  color: #1f2328;
   border-radius: 6px;
   padding: 16px;
   overflow-x: auto;
@@ -71,6 +87,7 @@
 
 .markdown-body pre code {
   background-color: transparent;
+  color: inherit;
   padding: 0;
   font-size: 100%;
 }
@@ -147,62 +164,53 @@
 
 /* Horizontal rule */
 .markdown-body hr {
-  height: 0.25em;
+  height: 0;
   padding: 0;
   margin: 24px 0;
-  background-color: #d0d7de;
+  background-color: transparent;
   border: 0;
+  border-top: 2px solid var(--ds-border-neutral-default-default);
 }
 
-/* Dark mode support */
-@media (prefers-color-scheme: dark) {
-  .markdown-body {
-    color: #e6edf3;
-  }
+/* Dark mode support - matches app's data-theme attribute */
+[data-theme='dark'] .markdown-body {
+  color: #e6edf3;
+}
 
-  .markdown-body h1,
-  .markdown-body h2 {
-    border-bottom-color: #30363d;
-  }
+[data-theme='dark'] .markdown-body pre {
+  background-color: #161b22;
+  color: #e6edf3;
+}
 
-  .markdown-body pre {
-    background-color: #161b22;
-  }
+[data-theme='dark'] .markdown-body code {
+  background-color: rgba(110, 118, 129, 0.4);
+}
 
-  .markdown-body code {
-    background-color: rgba(110, 118, 129, 0.4);
-  }
+[data-theme='dark'] .markdown-body table th {
+  background-color: #161b22;
+}
 
-  .markdown-body table th {
-    background-color: #161b22;
-  }
+[data-theme='dark'] .markdown-body table th,
+[data-theme='dark'] .markdown-body table td {
+  border-color: #30363d;
+}
 
-  .markdown-body table th,
-  .markdown-body table td {
-    border-color: #30363d;
-  }
+[data-theme='dark'] .markdown-body table tr {
+  background-color: transparent;
+  border-top-color: #30363d;
+}
 
-  .markdown-body table tr {
-    background-color: transparent;
-    border-top-color: #30363d;
-  }
+[data-theme='dark'] .markdown-body table tr:nth-child(2n) {
+  background-color: rgba(110, 118, 129, 0.1);
+}
 
-  .markdown-body table tr:nth-child(2n) {
-    background-color: rgba(110, 118, 129, 0.1);
-  }
+[data-theme='dark'] .markdown-body blockquote {
+  color: #8b949e;
+  border-left-color: #30363d;
+}
 
-  .markdown-body blockquote {
-    color: #8b949e;
-    border-left-color: #30363d;
-  }
-
-  .markdown-body a {
-    color: #58a6ff;
-  }
-
-  .markdown-body hr {
-    background-color: #30363d;
-  }
+[data-theme='dark'] .markdown-body a {
+  color: #58a6ff;
 }
 
 /* Task list styling */
@@ -217,7 +225,7 @@
 
 /* Ensure compatibility with your app's theme */
 .markdown-body {
-  background-color: transparent !important;
+  background-color: inherit;
   font-family:
     -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica,
     Arial, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji' !important;

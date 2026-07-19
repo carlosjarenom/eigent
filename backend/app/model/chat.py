@@ -12,23 +12,23 @@
 # limitations under the License.
 # ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 
-from enum import Enum
 import json
-from pathlib import Path
-import re
-from typing import Literal
-from pydantic import BaseModel, Field, field_validator
-from camel.types import ModelType, RoleType
 import logging
+import re
+from pathlib import Path
+from typing import Any, Literal
+
+from camel.types import ModelType, RoleType
+from pydantic import BaseModel, Field, field_validator
+
+from app.model.enums import DEFAULT_SUMMARY_PROMPT, Status  # noqa: F401
+from app.model.model_platform import (
+    NormalizedModelPlatform,
+    NormalizedOptionalModelPlatform,
+)
+from app.remote_sub_agent.config import RemoteSubAgentConfig
 
 logger = logging.getLogger("chat_model")
-
-
-class Status(str, Enum):
-    confirming = "confirming"
-    confirmed = "confirmed"
-    processing = "processing"
-    done = "done"
 
 
 class ChatHistory(BaseModel):
@@ -42,51 +42,67 @@ class QuestionAnalysisResult(BaseModel):
     )
     answer: str | None = Field(
         default=None,
-        description="Direct answer for simple questions. None for complex tasks."
+        description="Direct answer for simple questions."
+        " None for complex tasks.",
     )
 
 
 McpServers = dict[Literal["mcpServers"], dict[str, dict]]
 
-PLATFORM_MAPPING = {
-    "Z.ai": "openai-compatible-model",
-    "ModelArk": "openai-compatible-model",
-}
 
 class Chat(BaseModel):
     task_id: str
     project_id: str
+    space_id: str | None = None
+    run_id: str | None = None
+    space_root_path: str | None = None
+    workdir_mode: (
+        Literal["worktree", "copy", "direct-write", "artifact-only"] | None
+    ) = None
     question: str
     email: str
     attaches: list[str] = []
-    model_platform: str
+    model_platform: NormalizedModelPlatform
     model_type: str
     api_key: str
-    api_url: str | None = None  # for cloud version, user don't need to set api_url
+    # for cloud version, user don't need to set api_url
+    api_url: str | None = None
+    # Marker for subscription-auth providers (e.g. Codex). When set, the token
+    # is NOT carried in api_key; the runtime resolves a fresh access token from
+    # the desktop-local resolver instead. None => legacy api_key path (default,
+    # no behavior change). See docs/models/codex-subscription-auth-review.md.
+    auth_source: Literal["codex_subscription"] | None = None
     language: str = "en"
     browser_port: int = 9222
+    cdp_browsers: list[dict] = Field(default_factory=list)
     max_retries: int = 3
     allow_local_system: bool = False
     installed_mcp: McpServers = {"mcpServers": {}}
     bun_mirror: str = ""
     uvx_mirror: str = ""
     env_path: str | None = None
-    summary_prompt: str = (
-        "After completing the task, please generate a summary of the entire task completion. "
-        "The summary must be enclosed in <summary></summary> tags and include:\n"
-        "1. A confirmation of task completion, referencing the original goal.\n"
-        "2. A high-level overview of the work performed and the final outcome.\n"
-        "3. A bulleted list of key results or accomplishments.\n"
-        "Adopt a confident and professional tone."
-    )
+    summary_prompt: str = DEFAULT_SUMMARY_PROMPT
     new_agents: list["NewAgent"] = []
-    extra_params: dict | None = None  # For provider-specific parameters like Azure
-    search_config: dict[str, str] | None = None  # User-specific search engine configurations (e.g., GOOGLE_API_KEY, SEARCH_ENGINE_ID)
-
-    @field_validator("model_platform")
-    @classmethod
-    def map_model_platform(cls, v: str) -> str:
-        return PLATFORM_MAPPING.get(v, v)
+    # Parameters forwarded with each inference request, such as temperature,
+    # top_p, or max_tokens. Constructor-only provider settings remain in
+    # extra_params for backward compatibility.
+    model_config_dict: dict[str, Any] | None = None
+    # For provider-specific parameters like Azure
+    extra_params: dict | None = None
+    # User-specific search engine configurations
+    # (e.g., GOOGLE_API_KEY, SEARCH_ENGINE_ID)
+    search_config: dict[str, str] | None = None
+    # User identifier for user-specific skill configurations
+    user_id: str | int | None = None
+    # Direct server API base URL (for example http://localhost:3001/api/v1)
+    # used by standalone Brain to sync replay steps without Electron env injection.
+    server_url: str | None = None
+    session_mode: Literal["workforce", "single-agent"] = "workforce"
+    toolkit_config: dict[str, Any] | None = None
+    remote_sub_agent_config: RemoteSubAgentConfig | None = None
+    # Durable Project context reconstructed from persisted runs after restart.
+    # In-process follow-ups still prefer TaskLock.conversation_history.
+    project_context: str | None = None
 
     @field_validator("model_type")
     @classmethod
@@ -98,21 +114,92 @@ class Chat(BaseModel):
             logger.debug("model_type is invalid")
         return model_type
 
+    def skill_config_user_id(self) -> str | None:
+        """Return the filesystem user_id used by skills-config.
+
+        Prefer the canonical user-id-owned directory (`user_<id>`) and migrate
+        the previous email-local-part config into it when possible.
+        """
+        legacy_user_id = re.sub(
+            r'[\\/*?:"<>|\s]', "_", self.email.split("@")[0]
+        ).strip(".")
+        if self.user_id is not None and str(self.user_id).strip():
+            sanitized_user_id = re.sub(
+                r'[\\/*?:"<>|\s]', "_", str(self.user_id)
+            ).strip(".")
+            if sanitized_user_id:
+                user_id = f"user_{sanitized_user_id}"
+                try:
+                    from app.service.skill_config_service import (
+                        migrate_legacy_skill_config,
+                    )
+
+                    migrate_legacy_skill_config(user_id, legacy_user_id)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to migrate legacy skills config: %s", e
+                    )
+                return user_id
+        return legacy_user_id or None
+
     def get_bun_env(self) -> dict[str, str]:
-        return {"NPM_CONFIG_REGISTRY": self.bun_mirror} if self.bun_mirror else {}
+        return (
+            {"NPM_CONFIG_REGISTRY": self.bun_mirror} if self.bun_mirror else {}
+        )
 
     def get_uvx_env(self) -> dict[str, str]:
-        return {"UV_DEFAULT_INDEX": self.uvx_mirror, "PIP_INDEX_URL": self.uvx_mirror} if self.uvx_mirror else {}
+        return (
+            {
+                "UV_DEFAULT_INDEX": self.uvx_mirror,
+                "PIP_INDEX_URL": self.uvx_mirror,
+            }
+            if self.uvx_mirror
+            else {}
+        )
 
     def is_cloud(self):
-        return self.api_url is not None and "44.247.171.124" in self.api_url
+        if self.api_url is None:
+            return False
+        return any(
+            marker in self.api_url
+            for marker in ("eigent-proxy", "proxy.eigent.ai")
+        )
 
     def file_save_path(self, path: str | None = None):
-        email = re.sub(r'[\\/*?:"<>|\s]', "_", self.email.split("@")[0]).strip(".")
+        legacy_owner_key = re.sub(
+            r'[\\/*?:"<>|\s]', "_", self.email.split("@")[0]
+        ).strip(".")
+        if self.user_id is not None and str(self.user_id).strip():
+            owner_key = "user_" + re.sub(
+                r'[\\/*?:"<>|\s]', "_", str(self.user_id)
+            ).strip(".")
+        else:
+            owner_key = legacy_owner_key
+        run_id = self.run_id or self.task_id
         # Use project-based structure: project_{project_id}/task_{task_id}
-        save_path = Path.home() / "eigent" / email / f"project_{self.project_id}" / f"task_{self.task_id}"
-        if path is not None:
-            save_path = save_path / path
+        project_base = (
+            Path.home()
+            / "eigent"
+            / owner_key
+            / f"project_{self.project_id}"
+            / f"task_{run_id}"
+        )
+        legacy_project_base = (
+            Path.home()
+            / "eigent"
+            / legacy_owner_key
+            / f"project_{self.project_id}"
+            / f"task_{run_id}"
+        )
+        if (
+            owner_key != legacy_owner_key
+            and not project_base.exists()
+            and legacy_project_base.exists()
+        ):
+            # Bridge old installs whose artifacts were written under
+            # ~/eigent/{email_sanitized} before user_id-owned roots existed.
+            project_base = legacy_project_base
+        save_path = project_base / path if path is not None else project_base
         save_path.mkdir(parents=True, exist_ok=True)
 
         return str(save_path)
@@ -121,6 +208,8 @@ class Chat(BaseModel):
 class SupplementChat(BaseModel):
     question: str
     task_id: str | None = None
+    attaches: list[str] = []
+    project_context: str | None = None
 
 
 class HumanReply(BaseModel):
@@ -138,22 +227,28 @@ class UpdateData(BaseModel):
 
 
 class AgentModelConfig(BaseModel):
-    """Optional per-agent model configuration to override the default task model."""
-    model_platform: str | None = None
+    """Optional per-agent model configuration
+    to override the default task model."""
+
+    model_platform: NormalizedOptionalModelPlatform = None
     model_type: str | None = None
     api_key: str | None = None
     api_url: str | None = None
+    model_config_dict: dict[str, Any] | None = None
     extra_params: dict | None = None
 
     def has_custom_config(self) -> bool:
         """Check if any custom model configuration is set."""
-        return any([
-            self.model_platform is not None,
-            self.model_type is not None,
-            self.api_key is not None,
-            self.api_url is not None,
-            self.extra_params is not None,
-        ])
+        return any(
+            [
+                self.model_platform is not None,
+                self.model_type is not None,
+                self.api_key is not None,
+                self.api_url is not None,
+                self.model_config_dict is not None,
+                self.extra_params is not None,
+            ]
+        )
 
 
 class NewAgent(BaseModel):
@@ -176,6 +271,7 @@ class AddTaskRequest(BaseModel):
 
 class RemoveTaskRequest(BaseModel):
     task_id: str
+
 
 def sse_json(step: str, data):
     res_format = {"step": step, "data": data}

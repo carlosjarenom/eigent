@@ -12,98 +12,190 @@
 // limitations under the License.
 // ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 
-import { Copy, FileText } from "lucide-react";
-import { MarkDown } from "./MarkDown";
-import { useMemo } from "react";
-import { Button } from "../../ui/button";
+import { fileInfoFromPath } from '@/lib/fileInfo';
+import { usePageTabStore } from '@/store/pageTabStore';
+import { Check, Copy, FileText, ThumbsDown, ThumbsUp } from 'lucide-react';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { useTranslation } from 'react-i18next';
+import { toast } from 'sonner';
+import { Button } from '../../ui/button';
+import { MarkDown } from './MarkDown';
+
+const COPIED_RESET_MS = 2000;
+
+type MessageFeedback = 'up' | 'down' | null;
 
 interface AgentMessageCardProps {
-	id: string;
-	content: string;
-	className?: string;
-	typewriter?: boolean;
-	attaches?: File[];
-	onTyping?: () => void;
+  id: string;
+  content: string;
+  className?: string;
+  typewriter?: boolean;
+  attaches?: File[];
+  /** Shown only after markdown (and typewriter, if enabled) has finished rendering — e.g. generated file chips. */
+  deferredFooter?: ReactNode;
+  onTyping?: () => void;
+  onMarkdownRenderComplete?: () => void;
 }
 
-// global Map to track completed typewriter effect content hash
-const completedTypewriterHashes = new Map<string, boolean>();
+// Tracks agent messages that have already played the typewriter (by stable message id).
+const completedTypewriterByMessageId = new Map<string, boolean>();
 
 export function AgentMessageCard({
-	id,
-	content,
-	typewriter = true,
-	onTyping,
-	className,
-	attaches,
+  id,
+  content,
+  typewriter = true,
+  onTyping,
+  onMarkdownRenderComplete,
+  className,
+  attaches,
+  deferredFooter,
 }: AgentMessageCardProps) {
-	// use content hash to track if typewriter effect is completed
-	const contentHash = useMemo(() => {
-		return `${id}-${content}`;
-	}, [id, content]);
+  const openFilePreview = usePageTabStore((s) => s.openFilePreview);
+  const [markdownAndTypingComplete, setMarkdownAndTypingComplete] = useState(
+    () => completedTypewriterByMessageId.has(id)
+  );
 
-	// check if typewriter effect is completed
-	const isCompleted = completedTypewriterHashes.has(contentHash);
+  useEffect(() => {
+    setMarkdownAndTypingComplete(completedTypewriterByMessageId.has(id));
+  }, [id]);
 
-	// if completed, disable typewriter effect
-	const enableTypewriter = !isCompleted;
+  const isCompleted = completedTypewriterByMessageId.has(id);
+  const enableTypewriter = !isCompleted;
 
-	// when typewriter effect is completed, record to global Map
-	const handleTypingComplete = () => {
-		if (!isCompleted) {
-			completedTypewriterHashes.set(contentHash, true);
-		}
-		if (onTyping) {
-			onTyping();
-		}
-	};
+  const [copied, setCopied] = useState(false);
+  const [feedback, setFeedback] = useState<MessageFeedback>(null);
+  const { t } = useTranslation();
 
-	const handleCopy = () => {
-		navigator.clipboard.writeText(content);
-	};
+  useEffect(() => {
+    setFeedback(null);
+  }, [id]);
 
-	return (
-		<div
-			key={id}
-			className={`relative bg-white-0% w-full rounded-xl border px-sm py-3 ${className || ""} group overflow-hidden`}
-		>
-			<div className="absolute bottom-[0px] right-1 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
-				<Button onClick={handleCopy} variant="ghost" size="icon">
-					<Copy />
-				</Button>
-			</div>
-			<MarkDown
-				content={content}
-				onTyping={handleTypingComplete}
-				enableTypewriter={enableTypewriter && typewriter}
-			/>
-			{attaches && attaches.length > 0 && (
-				<div className="flex gap-2 flex-wrap mt-[10px]">
-					{attaches?.map((file) => {
-						return (
-							<div
-								onClick={(e) => {
-									e.stopPropagation();
-									window.ipcRenderer.invoke("reveal-in-folder", file.filePath);
-								}}
-								key={"attache-" + file.fileName}
-								className="cursor-pointer flex w-full items-center gap-2 bg-message-fill-default border border-solid border-task-border-default rounded-2xl pl-2 py-1 "
-							>
-								<FileText size={24} className="flex-shrink-0" />
-								<div className="flex flex-col">
-									<div className="max-w-48 font-bold text-sm text-body text-text-body overflow-hidden text-ellipsis whitespace-nowrap">
-										{file?.fileName?.split(".")[0]}
-									</div>
-									<div className="font-medium leading-29 text-xs text-text-body">
-										{file?.fileName?.split(".")[1]}
-									</div>
-								</div>
-							</div>
-						);
-					})}
-				</div>
-			)}
-		</div>
-	);
+  const handleTypingComplete = () => {
+    if (!completedTypewriterByMessageId.has(id)) {
+      completedTypewriterByMessageId.set(id, true);
+    }
+    if (onTyping) {
+      onTyping();
+    }
+  };
+
+  const handleCopy = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(content);
+      toast.success(t('setting.copied-to-clipboard'));
+      setCopied(true);
+      setTimeout(() => setCopied(false), COPIED_RESET_MS);
+    } catch {
+      toast.error('Failed to copy to clipboard');
+    }
+  }, [content, t]);
+
+  const handleMarkdownRenderComplete = useCallback(() => {
+    setMarkdownAndTypingComplete(true);
+    onMarkdownRenderComplete?.();
+  }, [onMarkdownRenderComplete]);
+
+  const handleThumbUp = useCallback(() => {
+    if (feedback !== null) return;
+    setFeedback('up');
+    toast.success('Thanks for your feedback');
+  }, [feedback]);
+
+  const handleThumbDown = useCallback(() => {
+    if (feedback !== null) return;
+    setFeedback('down');
+    toast.success('Thanks for your feedback');
+  }, [feedback]);
+
+  const showDeferredFileUi =
+    markdownAndTypingComplete &&
+    ((attaches && attaches.length > 0) || deferredFooter != null);
+
+  return (
+    <div
+      key={id}
+      className={`rounded-xl px-6 py-3 flex w-full flex-col bg-transparent ${className || ''} overflow-hidden`}
+    >
+      <MarkDown
+        content={content}
+        onTyping={handleTypingComplete}
+        onMarkdownRenderComplete={handleMarkdownRenderComplete}
+        enableTypewriter={enableTypewriter && typewriter}
+      />
+      {showDeferredFileUi && attaches && attaches.length > 0 && (
+        <div className="gap-2 mt-[10px] flex flex-wrap">
+          {attaches?.map((file) => {
+            return (
+              <div
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openFilePreview(
+                    fileInfoFromPath(file.filePath, file.fileName)
+                  );
+                }}
+                key={'attache-' + file.fileName}
+                className="gap-2 rounded-2xl border-ds-border-neutral-subtle-default bg-ds-bg-neutral-default-default py-1 pl-2 flex w-full cursor-pointer items-center border border-solid"
+              >
+                <FileText size={24} className="flex-shrink-0" />
+                <div className="flex flex-col">
+                  <div className="text-body max-w-48 text-sm font-bold text-ds-text-neutral-default-default overflow-hidden text-ellipsis whitespace-nowrap">
+                    {file?.fileName?.split('.')[0]}
+                  </div>
+                  <div className="text-xs font-medium leading-29 text-ds-text-neutral-default-default">
+                    {file?.fileName?.split('.')[1]}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {showDeferredFileUi && deferredFooter != null && (
+        <div className="mt-[10px] w-full">{deferredFooter}</div>
+      )}
+      {markdownAndTypingComplete && (
+        <div className="mt-3 gap-1 flex shrink-0 justify-start">
+          <Button
+            onClick={handleCopy}
+            variant="ghost"
+            size="xs"
+            buttonContent="icon-only"
+            aria-label={t('setting.copy')}
+          >
+            {copied ? (
+              <Check className="h-4 w-4 text-ds-text-success-default-default" />
+            ) : (
+              <Copy className="h-4 w-4" />
+            )}
+          </Button>
+          <Button
+            onClick={handleThumbUp}
+            variant="ghost"
+            size="xs"
+            buttonContent="icon-only"
+            aria-label="Thumb up"
+            aria-pressed={feedback === 'up'}
+            disabled={feedback === 'down'}
+          >
+            <ThumbsUp
+              className={`h-4 w-4 ${feedback === 'up' ? 'text-ds-text-brand-default-default' : ''}`}
+            />
+          </Button>
+          <Button
+            onClick={handleThumbDown}
+            variant="ghost"
+            size="xs"
+            buttonContent="icon-only"
+            aria-label="Thumb down"
+            aria-pressed={feedback === 'down'}
+            disabled={feedback === 'up'}
+          >
+            <ThumbsDown
+              className={`h-4 w-4 ${feedback === 'down' ? 'text-ds-text-brand-default-default' : ''}`}
+            />
+          </Button>
+        </div>
+      )}
+    </div>
+  );
 }
-

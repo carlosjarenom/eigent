@@ -12,110 +12,124 @@
 // limitations under the License.
 // ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 
-import TopBar from "@/components/TopBar";
-import { Outlet } from "react-router-dom";
-import HistorySidebar from "../HistorySidebar";
-import { InstallDependencies } from "@/components/InstallStep/InstallDependencies";
-import { useAuthStore } from "@/store/authStore";
-import { useEffect, useState } from "react";
-import { AnimationJson } from "@/components/AnimationJson";
-import animationData from "@/assets/animation/onboarding_success.json";
-import CloseNoticeDialog from "../Dialog/CloseNotice";
-import { useInstallationUI } from "@/store/installationStore";
-import { useInstallationSetup } from "@/hooks/useInstallationSetup";
-import InstallationErrorDialog from "../InstallStep/InstallationErrorDialog/InstallationErrorDialog";
-import Halo from "../Halo";
-import useChatStoreAdapter from "@/hooks/useChatStoreAdapter";
+import { InstallDependencies } from '@/components/InstallStep/InstallDependencies';
+import TopBar from '@/components/TopBar';
+import useChatStoreAdapter from '@/hooks/useChatStoreAdapter';
+import { useInstallationSetup } from '@/hooks/useInstallationSetup';
+import { useHost } from '@/host';
+import { useAuthStore } from '@/store/authStore';
+import { hasAnyActiveRun } from '@/store/chatStore';
+import { useInstallationUI } from '@/store/installationStore';
+import { useEffect, useState } from 'react';
+import { Outlet } from 'react-router-dom';
+import CloseNoticeDialog from '../Dialog/CloseNotice';
+import HistorySidebar from '../HistorySidebar';
+import InstallationErrorDialog from '../InstallStep/InstallationErrorDialog/InstallationErrorDialog';
 
 const Layout = () => {
-	const { initState, isFirstLaunch, setIsFirstLaunch, setInitState } = useAuthStore();
-	const [noticeOpen, setNoticeOpen] = useState(false);
+  const host = useHost();
+  const {
+    initState,
+    isFirstLaunch,
+    onboardingCompleted,
+    setInitState: _setInitState,
+  } = useAuthStore();
+  const [noticeOpen, setNoticeOpen] = useState(false);
 
-	//Get Chatstore for the active project's task
-	const { chatStore } = useChatStoreAdapter();
-	if (!chatStore) {
-		console.log(chatStore);
+  //Get Chatstore for the active project's task
+  const { chatStore } = useChatStoreAdapter();
 
-		return <div>Loading...</div>;
-	}
+  const {
+    installationState,
+    latestLog,
+    error,
+    backendError,
+    isInstalling,
+    isBackendReady,
+    shouldShowInstallScreen,
+    retryInstallation,
+    retryBackend,
+  } = useInstallationUI();
 
-	const {
-		installationState,
-		latestLog,
-		error,
-		backendError,
-		isInstalling,
-		shouldShowInstallScreen,
-		retryInstallation,
-		retryBackend,
-	} = useInstallationUI();
+  useInstallationSetup();
 
-	useInstallationSetup();
+  useEffect(() => {
+    if (!host?.ipcRenderer || !host?.electronAPI) return;
 
-	useEffect(() => {
-		const handleBeforeClose = () => {
-			const currentStatus = chatStore.tasks[chatStore.activeTaskId as string]?.status;
-			if(["running", "pause"].includes(currentStatus)) {
-				setNoticeOpen(true);
-			} else {
-				window.electronAPI.closeWindow(true);
-			}
-		};
+    const handleBeforeClose = () => {
+      // Closing the window severs every run's SSE stream and the backend
+      // aborts the in-flight work, so check all Projects' live runs --
+      // checking only the active task missed runs streaming in other
+      // Projects and let the window close without any warning.
+      const currentStatus = chatStore?.activeTaskId
+        ? chatStore.tasks[chatStore.activeTaskId]?.status
+        : undefined;
+      const activeTaskBusy = Boolean(
+        currentStatus && ['running', 'pause'].includes(currentStatus)
+      );
+      if (activeTaskBusy || hasAnyActiveRun()) {
+        setNoticeOpen(true);
+      } else {
+        host.electronAPI.closeWindow(true);
+      }
+    };
 
-		window.ipcRenderer.on("before-close", handleBeforeClose);
+    host.ipcRenderer.on('before-close', handleBeforeClose);
+    return () => {
+      host.ipcRenderer?.removeAllListeners('before-close');
+    };
+  }, [chatStore, host]);
 
-		return () => {
-			window.ipcRenderer.removeAllListeners("before-close");
-		};
-	}, [chatStore.tasks, chatStore.activeTaskId]);
+  // Show install screen if: installation UI is active, user hasn't finished setup,
+  // or backend hasn't passed health check yet.
+  // isBackendReady defaults to false on each app launch (non-persisted),
+  // so the main UI is gated until health check passes — no race condition.
+  // Also wait for first-launch onboarding to be completed before showing main UI.
+  const actualShouldShowInstallScreen =
+    shouldShowInstallScreen ||
+    initState !== 'done' ||
+    !isBackendReady ||
+    (isFirstLaunch && !onboardingCompleted);
+  const shouldShowMainContent = !actualShouldShowInstallScreen;
 
-	// Determine what to show based on states
-	const shouldShowOnboarding = initState === "done" && isFirstLaunch && !isInstalling;
+  return (
+    <div className="bg-ds-bg-neutral-muted-default relative flex h-full flex-col overflow-hidden">
+      <div
+        className={
+          actualShouldShowInstallScreen
+            ? 'pointer-events-none select-none'
+            : undefined
+        }
+      >
+        <TopBar />
+      </div>
+      <div className="min-h-0 relative h-full flex-1 overflow-hidden">
+        {/* Installation screen */}
+        {actualShouldShowInstallScreen && <InstallDependencies />}
 
-	const actualShouldShowInstallScreen = shouldShowInstallScreen || initState !== 'done' || installationState === 'waiting-backend';
-	const shouldShowMainContent = !actualShouldShowInstallScreen;
+        {/* Main app content */}
+        {shouldShowMainContent && (
+          <>
+            <Outlet />
+            <HistorySidebar />
+          </>
+        )}
 
-	return (
-		<div className="h-full flex flex-col relative overflow-hidden">
-			<TopBar />
-			<div className="flex-1 h-full min-h-0 overflow-hidden relative">
-				{/* Onboarding animation */}
-				{shouldShowOnboarding && (
-					<AnimationJson
-						onComplete={() => setIsFirstLaunch(false)}
-						animationData={animationData}
-					/>
-				)}
+        {(backendError || (error && installationState === 'error')) && (
+          <InstallationErrorDialog
+            error={error || ''}
+            backendError={backendError}
+            installationState={installationState}
+            latestLog={latestLog}
+            retryInstallation={retryInstallation}
+            retryBackend={retryBackend}
+          />
+        )}
 
-				{/* Installation screen */}
-				{actualShouldShowInstallScreen && <InstallDependencies />}
-
-				{/* Main app content */}
-				{shouldShowMainContent && (
-					<>
-						<Outlet />
-						<HistorySidebar />
-					</>
-				)}
-
-				{(backendError || (error && installationState === "error")) && (
-					<InstallationErrorDialog
-						error={error || ""}
-						backendError={backendError}
-						installationState={installationState}
-						latestLog={latestLog}
-						retryInstallation={retryInstallation}
-						retryBackend={retryBackend}
-					/>
-				)}
-
-				<CloseNoticeDialog
-					onOpenChange={setNoticeOpen}
-					open={noticeOpen}
-				/>
-			</div>
-			</div>
-	);
+        <CloseNoticeDialog onOpenChange={setNoticeOpen} open={noticeOpen} />
+      </div>
+    </div>
+  );
 };
 
 export default Layout;

@@ -1,6 +1,6 @@
 ---
-title: "Bring Your Own Key (BYOK)"
-description: "Configure your own API keys to use various LLM providers with Eigent."
+title: Bring Your Own Key (BYOK)
+description: Configure your own API keys to use various LLM providers with Eigent.
 ---
 
 ## What is BYOK?
@@ -16,22 +16,18 @@ description: "Configure your own API keys to use various LLM providers with Eige
 ### Step 1: Get Your API Key
 
 1. Visit the [OpenAI API Keys page](https://platform.openai.com/api-keys)
-2. Click **"Create new secret key"**
-3. Copy the generated key (you won't be able to see it again)
+1. Click **"Create new secret key"**
+1. Copy the generated key (you won't be able to see it again)
 
 ### Step 2: Configure in Eigent
 
-1. Launch Eigent and go to **Settings** \> **Models**
-2. Find the **OpenAI** card in the Custom Model section
+1. Launch Eigent and go to **Agent** > **Models**
 
-   <img
-     src="/images/Screenshot2026-01-20at18.13.45.png"
-     alt="Screenshot 2026 01 20 At 18 13 45"
-     title="Screenshot 2026 01 20 At 18 13 45"
-     className="mr-auto"
-     style={{ width:"74%" }}
-   />
-3. Fill in the following fields:
+1. Find the **OpenAI** card in the Custom Model section
+
+![byok_1](/images/byok_1.png)
+
+1. Fill in the following fields:
 
 | Field          | Value                     | Example                     |
 | -------------- | ------------------------- | --------------------------- |
@@ -40,7 +36,7 @@ description: "Configure your own API keys to use various LLM providers with Eige
 | **Model Type** | The model you want to use | `gpt-4o`, `gpt-4o-mini`     |
 
 4. Click **Save** to validate and store your configuration
-5. Click **Set as Default** to use this provider for your agents
+1. Click **Set as Default** to use this provider for your agents
 
 ## Configuration Fields
 
@@ -72,19 +68,28 @@ When saving your configuration, Eigent validates your API key and model. Here ar
 
 Eigent supports the following BYOK providers:
 
-| Provider              | Default API Host                                           | Official Documentation                                                                        |
-| --------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| **OpenAI**            | `https://api.openai.com/v1`                                | [OpenAI API Docs](https://platform.openai.com/docs/api-reference)                             |
-| **Anthropic**         | `https://api.anthropic.com/v1/`                            | [Anthropic API Docs](https://docs.anthropic.com/en/api/getting-started)                       |
-| **Google Gemini**     | `https://generativelanguage.googleapis.com/v1beta/openai/` | [Gemini API Docs](https://ai.google.dev/gemini-api/docs)                                      |
-| **OpenRouter**        | `https://openrouter.ai/api/v1`                             | [OpenRouter Docs](https://openrouter.ai/docs)                                                 |
-| **Qwen (Alibaba)**    | `https://dashscope.aliyuncs.com/compatible-mode/v1`        | [Qwen API Docs](https://help.aliyun.com/zh/dashscope/developer-reference/api-details)         |
-| **DeepSeek**          | `https://api.deepseek.com`                                 | [DeepSeek API Docs](https://platform.deepseek.com/api-docs)                                   |
-| **Minimax**           | `https://api.minimax.io/v1`                                | [Minimax API Docs](https://platform.minimaxi.com/document/Announcement)                       |
-| **Z.ai**              | `https://api.z.ai/api/coding/paas/v4/`                     | [Z.ai Platform](https://z.ai)                                                                 |
-| **Azure OpenAI**      | _(user-provided)_                                          | [Azure OpenAI Docs](https://learn.microsoft.com/en-us/azure/ai-services/openai/reference)     |
-| **AWS Bedrock**       | _(user-provided)_                                          | [AWS Bedrock Docs](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html) |
-| **OpenAI Compatible** | _(user-provided)_                                          | For custom endpoints (e.g., xAI, local servers)                                               |
+| Provider                  | Default API Host                                           | Official Documentation                                                                        |
+| ------------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| **Google Gemini**         | `https://generativelanguage.googleapis.com/v1beta/openai/` | [Gemini API Docs](https://ai.google.dev/gemini-api/docs)                                      |
+| **OpenAI**                | `https://api.openai.com/v1`                                | [OpenAI API Docs](https://platform.openai.com/docs/api-reference)                             |
+| **Anthropic**             | `https://api.anthropic.com`                                | [Anthropic API Docs](https://docs.anthropic.com/en/api/getting-started)                       |
+| **OrcaRouter**            | `https://api.orcarouter.ai/v1`                             | [OrcaRouter Docs](https://docs.orcarouter.ai/)                                                |
+| **OpenRouter**            | `https://openrouter.ai/api/v1`                             | [OpenRouter Docs](https://openrouter.ai/docs)                                                 |
+| **Nebius Token Factory**  | `https://api.tokenfactory.nebius.com/v1`                   | [Nebius Token Factory Docs](https://docs.tokenfactory.nebius.com/quickstart)                  |
+| **Qwen (Alibaba)**        | `https://dashscope.aliyuncs.com/compatible-mode/v1`        | [Qwen API Docs](https://help.aliyun.com/zh/dashscope/developer-reference/api-details)         |
+| **DeepSeek**              | `https://api.deepseek.com`                                 | [DeepSeek API Docs](https://platform.deepseek.com/api-docs)                                   |
+| **MiniMax**               | `https://api.minimax.io/v1`                                | [MiniMax API Docs](https://platform.minimax.io/docs/api-reference/api-overview)               |
+| **Z.ai**                  | `https://api.z.ai/api/coding/paas/v4/`                     | [Z.ai Developer Docs](https://zhipu-32152247.mintlify.app/api-reference/introduction)         |
+| **Moonshot**              | `https://api.moonshot.ai/v1`                               | [Moonshot AI Platform](https://platform.moonshot.ai/)                                         |
+| **ModelArk**              | `https://ark.ap-southeast.bytepluses.com/api/v3`           | [ModelArk Docs](https://docs.byteplus.com/en/docs/ModelArk/1298459)                           |
+| **SambaNova**             | `https://api.sambanova.ai/v1`                              | [SambaNova API Reference](https://docs.sambanova.ai/docs/en/api-reference/overview)           |
+| **Grok**                  | `https://api.x.ai/v1`                                      | [xAI Docs](https://docs.x.ai/docs/introduction)                                               |
+| **Mistral**               | `https://api.mistral.ai`                                   | [Mistral API Docs](https://docs.mistral.ai/api)                                               |
+| **AWS Bedrock**           | `https://bedrock-mantle.us-east-1.api.aws/v1`              | [AWS Bedrock Docs](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html) |
+| **AWS Bedrock Converse**  | `https://bedrock-runtime.us-east-1.amazonaws.com`          | [Bedrock Converse API](https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html) |
+| **Azure OpenAI**          | _(user-provided)_                                          | [Azure OpenAI Docs](https://learn.microsoft.com/en-us/azure/ai-services/openai/reference)     |
+| **Baidu ERNIE**           | `https://qianfan.baidubce.com/v2`                          | [Baidu Qianfan Docs](https://intl.cloud.baidu.com/doc/qianfan/index.html)                     |
+| **OpenAI Compatible**     | _(user-provided)_                                          | For custom endpoints (e.g., xAI, local servers)                                               |
 
 ## Tips
 
